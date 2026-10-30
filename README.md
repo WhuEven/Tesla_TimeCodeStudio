@@ -7,7 +7,7 @@
 > 本项目为**专有软件**，著作权归 **Haonan Zhu** 所有，代码公开仅供学习与非
 > 商业使用。**任何商业性使用（含企业内部使用、对外付费服务、转售分发）均需
 > 事先取得书面授权并支付授权费用**，详见 [`LICENSE`](LICENSE)。
-> 商用授权请联系作者（GitHub Issue 或仓库主页邮箱）。
+> 商用授权请联系作者：在本仓库提交 Issue（https://github.com/WhuEven/Tesla_TimeCodeStudio/issues）。
 
 ## 功能
 
