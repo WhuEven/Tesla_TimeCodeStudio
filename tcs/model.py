@@ -181,6 +181,7 @@ class Project:
 
     def __init__(self) -> None:
         self.clips: list[Clip] = []
+        self.view_filter: str | None = None   # 仅导出/统计该视角（None = 全部）
 
     # ---- 列表维护 -------------------------------------------------
     def add_paths(self, paths, probe) -> tuple[int, int]:
@@ -210,8 +211,33 @@ class Project:
             added += 1
         return added, skipped
 
+    def visible_clips(self) -> list[Clip]:
+        """当前视角范围内的片段（与表格显示一致）。"""
+        if self.view_filter is None:
+            return list(self.clips)
+        return [c for c in self.clips if c.view == self.view_filter]
+
     def active_clips(self) -> list[Clip]:
-        return [c for c in self.clips if c.enabled and c.clip_duration > 0.001]
+        """勾选参与拼接的片段（保持列表顺序）。"""
+        return [c for c in self.visible_clips() if c.enabled and c.clip_duration > 0.001]
+
+    def selected_span(self) -> tuple[datetime | None, datetime | None]:
+        """已选片段覆盖的最早开始 / 最晚结束时间。"""
+        starts, ends = [], []
+        for c in self.active_clips():
+            if c.start_dt is None:
+                continue
+            starts.append(c.in_dt)
+            end = c.end_dt
+            if end is not None:
+                ends.append(end)
+        if not starts:
+            return None, None
+        return min(starts), (max(ends) if ends else None)
+
+    def count_selected(self) -> tuple[int, int]:
+        """(已选段数, 当前可见段数)。"""
+        return len(self.active_clips()), len(self.visible_clips())
 
     def total_duration(self) -> float:
         return sum(c.clip_duration for c in self.active_clips())

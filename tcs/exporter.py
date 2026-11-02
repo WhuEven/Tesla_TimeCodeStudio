@@ -73,14 +73,19 @@ class ExportPlan:
 
 def build_plan(project: Project, settings: ExportSettings, style: OSSStyle,
                work_dir: Path, output: Path, ffmpeg: str,
-               fonts_dir: Path) -> ExportPlan:
+               fonts_dir: Path, keep_order: bool = False) -> ExportPlan:
+    """构建导出计划。
+
+    ``keep_order=True`` 时严格按片段列表当前顺序拼接（支持手动排序），
+    否则按文件时间戳重新排序，保证时间轴连续。
+    """
     work_dir.mkdir(parents=True, exist_ok=True)
     clips = project.active_clips()
     if not clips:
         raise ValueError("没有可导出的片段")
 
-    # 文件名没带时间的，用相邻片段推算补齐，保证时间轴连续
-    order: list[Clip] = sort_for_timeline(list(clips))
+    # 文件名没带时间的，用相邻片段推算补齐，保证时间码可用
+    order: list[Clip] = list(clips) if keep_order else sort_for_timeline(list(clips))
     if any(c.start_dt is None for c in order):
         pool = [c for c in project.clips]
         fill_missing_times(pool)

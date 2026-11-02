@@ -14,7 +14,7 @@ from PySide6.QtGui import QDesktopServices, QPixmap, QIntValidator
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
+    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QSlider, QSpinBox, QSplitter, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget, QApplication, QAbstractItemView,
     QHeaderView,
@@ -178,6 +178,7 @@ class MainWindow(QMainWindow):
         self.probe_bin = find_ffprobe()
         self.worker: ExportWorker | None = None
         self._loading = False
+        self._manual_order = False   # True = 用户手动排过序，导出按列表顺序
         self.fontgen_done = False
 
         self.setWindowTitle("TimeCode Studio — 行车记录仪 / 监控时间码工具")
@@ -197,22 +198,41 @@ class MainWindow(QMainWindow):
         b1 = QPushButton("导入文件…"); b1.clicked.connect(self.import_files)
         b2 = QPushButton("导入文件夹…"); b2.clicked.connect(self.import_folder)
         self.btn_sort = QPushButton("⇅ 按时间排序"); self.btn_sort.clicked.connect(self.sort_clips)
-        self.btn_trim = QPushButton("✂ 截取片段…"); self.btn_trim.clicked.connect(self.trim_selected)
-        self.btn_del = QPushButton("移除所选"); self.btn_del.clicked.connect(self.remove_selected)
-        for b in (b1, b2, self.btn_sort, self.btn_trim, self.btn_del):
+        self.btn_up = QPushButton("↑"); self.btn_up.setToolTip("所选片段在拼接顺序中上移")
+        self.btn_up.clicked.connect(lambda: self.move_selected(-1))
+        self.btn_down = QPushButton("↓"); self.btn_down.setToolTip("所选片段在拼接顺序中下移")
+        self.btn_down.clicked.connect(lambda: self.move_selected(1))
+        self.btn_trim = QPushButton("✂ 截取…"); self.btn_trim.clicked.connect(self.trim_selected)
+        self.btn_del = QPushButton("移除"); self.btn_del.clicked.connect(self.remove_selected)
+        for b in (b1, b2, self.btn_sort, self.btn_up, self.btn_down,
+                  self.btn_trim, self.btn_del):
             bar.addWidget(b)
         bar.addStretch(1)
         lv.addLayout(bar)
 
         filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("启用视角:"))
-        self.cmb_view = QComboBox(); self.cmb_view.currentTextChanged.connect(self.apply_view_filter)
-        filter_row.addWidget(self.cmb_view); filter_row.addStretch(1)
+        filter_row.addWidget(QLabel("显示视角:"))
+        self.cmb_view = QComboBox()
+        self.cmb_view.currentIndexChanged.connect(self.apply_view_filter)
+        filter_row.addWidget(self.cmb_view)
+        self.btn_all = QPushButton("全选"); self.btn_all.setToolTip("勾选当前可见的全部片段")
+        self.btn_all.clicked.connect(lambda: self.set_checked_mode("all"))
+        self.btn_none = QPushButton("清空"); self.btn_none.setToolTip("取消勾选全部片段")
+        self.btn_none.clicked.connect(lambda: self.set_checked_mode("none"))
+        self.btn_inv = QPushButton("反选"); self.btn_inv.setToolTip("反转当前可见片段的勾选状态")
+        self.btn_inv.clicked.connect(lambda: self.set_checked_mode("invert"))
+        for b in (self.btn_all, self.btn_none, self.btn_inv):
+            filter_row.addWidget(b)
+        filter_row.addStretch(1)
+        self.lbl_sel = QLabel("已选 0/0 段")
+        filter_row.addWidget(self.lbl_sel)
         lv.addLayout(filter_row)
 
         self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(
-            ["启用", "#", "文件名", "视角", "时间码起点", "入点", "出点", "截取时长", "规格"])
+            ["拼接", "#", "文件名", "视角", "时间码起点", "入点", "出点", "截取时长", "规格"])
+        self.table.horizontalHeaderItem(COL_CHECK).setToolTip(
+            "勾选 = 该片段参与拼接导出（可只选其中几段）")
         self.table.horizontalHeader().setSectionResizeMode(COL_NAME, QHeaderView.Stretch)
         for col, wd in ((COL_CHECK, 46), (COL_IDX, 32), (COL_VIEW, 84),
                         (COL_START, 150), (COL_IN, 92), (COL_OUT, 92),
@@ -226,7 +246,13 @@ class MainWindow(QMainWindow):
         self.table.dropEvent = self._drop
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.itemSelectionChanged.connect(self._sel_changed)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._table_menu)
         lv.addWidget(self.table)
+
+        hint = QLabel("勾选「拼接」列决定哪些片段参与导出 · 列表顺序即拼接顺序（↑↓ 可调）")
+        hint.setStyleSheet("color:#888;font-size:11px;")
+        lv.addWidget(hint)
 
         # ---- 右侧：设置 ----
         right = QWidget(); rv = QVBoxLayout(right)
@@ -399,27 +425,80 @@ class MainWindow(QMainWindow):
             if c.view and c.view not in views:
                 views.append(c.view)
         views.sort(key=lambda v: TESLA_VIEW_ORDER.index(v) if v in TESLA_VIEW_ORDER else 99)
-        cur = self.cmb_view.currentText()
+        cur = self.cmb_view.currentData()
         self.cmb_view.blockSignals(True)
         self.cmb_view.clear()
-        self.cmb_view.addItem("全部")
+        self.cmb_view.addItem("全部", None)
         for v in views:
             self.cmb_view.addItem(VIEW_LABELS.get(v, v), v)
         if cur:
-            idx = self.cmb_view.findText(cur)
+            idx = self.cmb_view.findData(cur)
             if idx >= 0:
                 self.cmb_view.setCurrentIndex(idx)
         self.cmb_view.blockSignals(False)
+        self.project.view_filter = self.cmb_view.currentData()
 
-    def apply_view_filter(self, _text):
-        data = self.cmb_view.currentData()
-        for c in self.project.clips:
-            c.enabled = data is None or c.view == data
+    def apply_view_filter(self, *_args):
+        """视角筛选同时决定显示与导出范围，不改动勾选状态。"""
+        self.project.view_filter = self.cmb_view.currentData()
         self.refresh_table()
+        self._update_estimate()
+
+    def visible_rows(self) -> list[int]:
+        return [i for i in range(self.table.rowCount()) if not self.table.isRowHidden(i)]
+
+    def set_checked_mode(self, mode: str):
+        """全选 / 清空 / 反选。全选与反选只作用于当前可见行。"""
+        if mode == "none":
+            rows = list(range(self.table.rowCount()))
+        else:
+            rows = self.visible_rows()
+        self._loading = True
+        for r in rows:
+            c = self.project.clips[r]
+            if mode == "all":
+                c.enabled = True
+            elif mode == "none":
+                c.enabled = False
+            else:
+                c.enabled = not c.enabled
+            item = self.table.item(r, COL_CHECK)
+            if item:
+                item.setCheckState(Qt.Checked if c.enabled else Qt.Unchecked)
+        self._loading = False
+        self._update_estimate()
+
+    def move_selected(self, delta: int):
+        """按行块移动所选片段，从而改变拼接顺序。"""
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        if not rows:
+            return
+        clips = self.project.clips
+        n = len(clips)
+        if delta < 0:
+            if rows[0] == 0:
+                return
+            for r in rows:                     # 自上而下上移，避免互相覆盖
+                clips[r - 1], clips[r] = clips[r], clips[r - 1]
+            new_rows = [r - 1 for r in rows]
+        else:
+            if rows[-1] == n - 1:
+                return
+            for r in reversed(rows):           # 自下而上逐个下移
+                clips[r + 1], clips[r] = clips[r], clips[r + 1]
+            new_rows = [r + 1 for r in rows]
+        self._manual_order = True
+        self.refresh_table()
+        self.table.clearSelection()
+        for r in new_rows:
+            self.table.selectRow(r)
+        self.statusBar().showMessage(
+            "拼接顺序已按列表排列（点「⇅ 按时间排序」可恢复时间顺序）", 6000)
         self._update_estimate()
 
     def sort_clips(self, checked=False, silent=False):
         self.project.clips = sort_for_timeline(self.project.clips)
+        self._manual_order = False
         self.refresh_table()
         if not silent:
             self._update_estimate()
@@ -431,6 +510,56 @@ class MainWindow(QMainWindow):
         self.refresh_table()
         self.refresh_view_combo()
         self._update_estimate()
+
+    def _table_menu(self, pos):
+        idx = self.table.indexAt(pos)
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        if idx.isValid() and idx.row() not in rows:
+            rows = [idx.row()]
+        if not rows:
+            return
+        menu = QMenu(self)
+        act_check = menu.addAction("勾选所选行")
+        act_uncheck = menu.addAction("取消勾选所选行")
+        menu.addSeparator()
+        act_solo = menu.addAction("只拼接此行（取消其他勾选）")
+        menu.addSeparator()
+        act_trim = menu.addAction("截取片段…")
+        act_up = menu.addAction("上移")
+        act_down = menu.addAction("下移")
+        menu.addSeparator()
+        act_del = menu.addAction("移除")
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen is act_check or chosen is act_uncheck:
+            want = chosen is act_check
+            self._loading = True
+            for r in rows:
+                self.project.clips[r].enabled = want
+                item = self.table.item(r, COL_CHECK)
+                if item:
+                    item.setCheckState(Qt.Checked if want else Qt.Unchecked)
+            self._loading = False
+            self._update_estimate()
+        elif chosen is act_solo:
+            self._loading = True
+            keep = idx.row()
+            for r, c in enumerate(self.project.clips):
+                c.enabled = (r == keep)
+                item = self.table.item(r, COL_CHECK)
+                if item:
+                    item.setCheckState(Qt.Checked if c.enabled else Qt.Unchecked)
+            self._loading = False
+            self._update_estimate()
+        elif chosen is act_trim:
+            self.trim_selected()
+        elif chosen is act_up:
+            self.move_selected(-1)
+        elif chosen is act_down:
+            self.move_selected(1)
+        elif chosen is act_del:
+            self.remove_selected()
 
     def trim_selected(self):
         rows = sorted({i.row() for i in self.table.selectedIndexes()})
@@ -446,6 +575,7 @@ class MainWindow(QMainWindow):
     def refresh_table(self):
         self._loading = True
         clips = self.project.clips
+        filt = self.cmb_view.currentData()
         self.table.setRowCount(len(clips))
         for i, c in enumerate(clips):
             it = QTableWidgetItem()
@@ -464,6 +594,8 @@ class MainWindow(QMainWindow):
             self.table.setItem(i, COL_SPEC, self._ro(
                 f"{c.info.width}×{c.info.height} {c.info.fps:.0f}fps" +
                 ("" if c.info.has_audio else " · 静音")))
+            # 视角筛选只隐藏行，勾选状态保留
+            self.table.setRowHidden(i, filt is not None and c.view != filt)
         self._loading = False
 
     @staticmethod
@@ -518,6 +650,8 @@ class MainWindow(QMainWindow):
         rows = {i.row() for i in self.table.selectedIndexes()}
         self.btn_trim.setEnabled(bool(rows))
         self.btn_del.setEnabled(bool(rows))
+        self.btn_up.setEnabled(bool(rows))
+        self.btn_down.setEnabled(bool(rows))
 
     # ---------------- OSD / 预估 ----------------
     def _osd_style(self, out_h: int) -> OSSStyle:
@@ -592,17 +726,24 @@ class MainWindow(QMainWindow):
 
     def _update_estimate(self):
         total = self.project.total_duration()
-        n = len(self.project.active_clips())
+        n, total_rows = self.project.count_selected()
         self.lbl_size.setText(f"{self.sld_size.value()/1000:.3f}×H")
+        self.lbl_sel.setText(f"已选 {n}/{total_rows} 段")
         if n == 0:
-            self.lbl_stats.setText("未导入片段")
+            self.lbl_stats.setText("没有勾选任何片段" if total_rows else "未导入片段")
             self.lbl_estimate.setText("—")
+            self.btn_export.setEnabled(False)
             return
         s = self._export_settings()
         w, h = resolve_output_size(self.project, s)
         fps = self.project.dominant_fps()
-        self.lbl_stats.setText(
-            f"{n} 段 · 总时长 {fmt_hms(total, True)} · 输出 {w}×{h} @ {fps:.0f}fps")
+        order = "按列表顺序拼接" if self._manual_order else "按时间顺序拼接"
+        lines = [f"{n} 段 · 时长 {fmt_hms(total, True)} · {order}",
+                 f"输出 {w}×{h} @ {fps:.0f}fps"]
+        a, b = self.project.selected_span()
+        if a is not None and b is not None:
+            lines.append(f"时间码 {a:%m-%d %H:%M:%S} → {b:%m-%d %H:%M:%S}")
+        self.lbl_stats.setText("\n".join(lines))
         est = s.target_size_bytes(total)
         self.lbl_estimate.setText(f"预估体积 ≈ {human_size(est)}")
         self.btn_export.setEnabled(True)
@@ -678,7 +819,8 @@ class MainWindow(QMainWindow):
         s = self._export_settings()
         style = self._osd_style(720)
         try:
-            plan = build_plan(self.project, s, style, work, Path(out), self.ffmpeg, fonts)
+            plan = build_plan(self.project, s, style, work, Path(out), self.ffmpeg, fonts,
+                             keep_order=self._manual_order)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "无法导出", str(exc))
             return
