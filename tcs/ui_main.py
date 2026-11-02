@@ -179,6 +179,7 @@ class MainWindow(QMainWindow):
         self.worker: ExportWorker | None = None
         self._loading = False
         self._manual_order = False   # True = 用户手动排过序，导出按列表顺序
+        self._loc_auto = True        # 地点是否仍由程序自动填写（用户改过则不再覆盖）
         self.fontgen_done = False
 
         self.setWindowTitle("TimeCode Studio — 行车记录仪 / 监控时间码工具")
@@ -204,8 +205,10 @@ class MainWindow(QMainWindow):
         self.btn_down.clicked.connect(lambda: self.move_selected(1))
         self.btn_trim = QPushButton("✂ 截取…"); self.btn_trim.clicked.connect(self.trim_selected)
         self.btn_del = QPushButton("移除"); self.btn_del.clicked.connect(self.remove_selected)
+        self.btn_clear = QPushButton("清空列表"); self.btn_clear.setToolTip("移除当前全部片段")
+        self.btn_clear.clicked.connect(self.clear_all)
         for b in (b1, b2, self.btn_sort, self.btn_up, self.btn_down,
-                  self.btn_trim, self.btn_del):
+                  self.btn_trim, self.btn_del, self.btn_clear):
             bar.addWidget(b)
         bar.addStretch(1)
         lv.addLayout(bar)
@@ -217,7 +220,7 @@ class MainWindow(QMainWindow):
         filter_row.addWidget(self.cmb_view)
         self.btn_all = QPushButton("全选"); self.btn_all.setToolTip("勾选当前可见的全部片段")
         self.btn_all.clicked.connect(lambda: self.set_checked_mode("all"))
-        self.btn_none = QPushButton("清空"); self.btn_none.setToolTip("取消勾选全部片段")
+        self.btn_none = QPushButton("全不选"); self.btn_none.setToolTip("取消勾选全部片段")
         self.btn_none.clicked.connect(lambda: self.set_checked_mode("none"))
         self.btn_inv = QPushButton("反选"); self.btn_inv.setToolTip("反转当前可见片段的勾选状态")
         self.btn_inv.clicked.connect(lambda: self.set_checked_mode("invert"))
@@ -264,6 +267,7 @@ class MainWindow(QMainWindow):
         self.chk_osd.toggled.connect(self._update_estimate)
         ov.addWidget(self.chk_osd)
         self.edt_loc = QLineEdit(); self.edt_loc.setPlaceholderText("第二行文本（可选，留空不显示）")
+        self.edt_loc.textEdited.connect(self._on_loc_edited)
         ov.addWidget(self.edt_loc)
         frow = QHBoxLayout()
         frow.addWidget(QLabel("字体:"))
@@ -368,6 +372,7 @@ class MainWindow(QMainWindow):
         dl = QVBoxLayout(dlg); dl.addWidget(QLabel("正在探测视频文件，请稍候…")); dl.addWidget(prog)
         dlg.show()
         added = skipped = 0
+        new_clips: list[Clip] = []
         exist = {str(c.path) for c in self.project.clips}
         QApplication.processEvents()
         for i, p in enumerate(paths):
@@ -387,9 +392,8 @@ class MainWindow(QMainWindow):
             clip = Clip.from_path(pp)
             clip.info = info
             clip.out_point = info.duration
-            if clip.time_source == "未识别" and info.location:
-                pass
             self.project.clips.append(clip)
+            new_clips.append(clip)
             exist.add(str(pp))
             added += 1
         prog.setValue(len(paths)); dlg.accept()
@@ -398,12 +402,45 @@ class MainWindow(QMainWindow):
         self.refresh_view_combo()
         self.sort_clips(silent=True)
         self._auto_pick_bitrate()
-        if not self.edt_loc.text():
-            loc = next((c.info.location for c in self.project.clips if c.info.location), "")
-            self.edt_loc.setText(loc)
+        self._apply_location_from_clips(new_clips)
         self.statusBar().showMessage(f"导入完成：新增 {added}，跳过 {skipped}（重复/不支持）", 8000)
         self.refresh_table()
         self._update_estimate()
+
+    def _on_loc_edited(self, _text: str):
+        """用户手动编辑过地点文本，之后导入不再覆盖。"""
+        self._loc_auto = False
+
+    def _apply_location_from_clips(self, clips: list[Clip] | None = None):
+        """刷新 OSD 地点行。
+
+        有 ``clips`` 时以这批新素材为准（旧素材的地点不会残留）；
+        用户手动改过这一栏则保持不变。
+        """
+        if not self._loc_auto:
+            return
+        pool = clips if clips is not None else self.project.clips
+        loc = next((c.info.location for c in pool if c.info.location), "")
+        self.edt_loc.setText(loc)
+        self._loc_auto = True
+
+    def clear_all(self):
+        """清空全部素材，并把地点等自动填充项恢复到初始状态。"""
+        if not self.project.clips:
+            return
+        ret = QMessageBox.question(self, "清空列表",
+                                   f"确定移除全部 {len(self.project.clips)} 个片段？")
+        if ret != QMessageBox.Yes:
+            return
+        self.project.clips.clear()
+        self.project.view_filter = None
+        self._manual_order = False
+        self._loc_auto = True
+        self.edt_loc.clear()
+        self.refresh_view_combo()
+        self.refresh_table()
+        self._update_estimate()
+        self.statusBar().showMessage("已清空片段列表", 5000)
 
     def _drag_enter(self, event):
         if event.mimeData().hasUrls():
@@ -509,6 +546,11 @@ class MainWindow(QMainWindow):
             del self.project.clips[r]
         self.refresh_table()
         self.refresh_view_combo()
+        if not self.project.clips:
+            self._loc_auto = True
+            self.edt_loc.clear()
+        else:
+            self._apply_location_from_clips()
         self._update_estimate()
 
     def _table_menu(self, pos):
