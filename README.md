@@ -29,14 +29,17 @@
 ## 运行
 
 ```bash
-# 依赖
-python3 -m pip install -r requirements.txt
+# 依赖（推荐用项目内虚拟环境，避免污染系统 Python）
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 
 # 启动
-python3 main.py
+.venv/bin/python main.py
 ```
 
 macOS 直接双击 `run.command`；Windows 双击 `run.bat`。
+两个脚本都会优先使用项目内的 `.venv`，没有则退回系统 `python3`
+（此时依赖会被装进该环境；系统 Python 3.9 也可运行）。
 
 > ffmpeg 优先使用系统 PATH 里的（`brew install ffmpeg`）；没有时自动使用
 > pip 附带的静态 ffmpeg，无需额外安装。
