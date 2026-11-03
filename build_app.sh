@@ -46,15 +46,149 @@ if [ -f "$PY_DYLIB" ] && [ -d "$PY_HEADERS" ] && command -v clang >/dev/null 2>&
     codesign -s - --force "$CONTENTS/Frameworks/Python3" >/dev/null 2>&1 || true
 
     STUB_SRC="$CONTENTS/MacOS/__host.c"
-    cat > "$STUB_SRC" <<'C'
+    # 注意：双击 .app 时 LaunchServices 直接执行本二进制，launcher 脚本不会运行，
+    # 因此 PYTHONHOME / PYTHONPATH / 工作目录必须在这里自己设置好。
+    cat > "$STUB_SRC" <<HOSTC
 /* TimeCode Studio 宿主：把 Python 解释器嵌入 app 包。
-   Py_BytesMain 直接接管 argv，进程的可执行文件就位于本 app 内，
+   双击 .app 时系统直接执行本二进制（不经过 launcher 脚本），
+   所以 Python 的启动环境必须在这里准备好，否则解释器找不到标准库、
+   启动即失败（表现为"软件无法启动"）。
+   Py_BytesMain 接管 argv，进程的可执行文件位于本 app 内，
    因此 NSBundle.mainBundle 指向本 app，菜单栏显示 CFBundleName 而非 "Python"。 */
 #include <Python.h>
-int main(int argc, char **argv) {
-    return Py_BytesMain(argc, argv);
+#include <limits.h>
+#include <mach-o/dyld.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#define DEF_ROOT "$ROOT"
+#define DEF_HOME "$PY_BASE_PREFIX"
+#define DEF_SITE "$PY_SITE"
+
+static int is_dir(const char *p) {
+    struct stat st;
+    return p && *p && stat(p, &st) == 0 && S_ISDIR(st.st_mode);
 }
-C
+
+static int has_main(const char *root) {
+    char buf[PATH_MAX];
+    struct stat st;
+    if (!root || !*root) return 0;
+    snprintf(buf, sizeof(buf), "%s/main.py", root);
+    return stat(buf, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static void up(char *p) {
+    char *s = strrchr(p, '/');
+    if (!s || s == p) return;
+    *s = '\\0';
+}
+
+int main(int argc, char **argv) {
+    char exe[PATH_MAX];
+    uint32_t sz = (uint32_t)sizeof(exe);
+    if (_NSGetExecutablePath(exe, &sz) != 0) return 1;
+    char real[PATH_MAX];
+    if (realpath(exe, real)) snprintf(exe, sizeof(exe), "%s", real);
+
+    /* 定位项目根：先信构建时写入的路径，再按包结构上溯（.app 被移动时兜底） */
+    char root[PATH_MAX];
+    snprintf(root, sizeof(root), "%s", DEF_ROOT);
+    if (!has_main(root)) {
+        char cand[PATH_MAX];
+        snprintf(cand, sizeof(cand), "%s", exe);
+        for (int i = 0; i < 4; i++) up(cand);  /* MacOS -> Contents -> .app -> 项目根 */
+        if (has_main(cand)) snprintf(root, sizeof(root), "%s", cand);
+    }
+
+    /* 日志：项目目录不可写时退回临时目录 */
+    int saved_out = dup(STDOUT_FILENO);
+    int saved_err = dup(STDERR_FILENO);
+    char log[PATH_MAX];
+    snprintf(log, sizeof(log), "%s/launch.log", root);
+    FILE *lf = fopen(log, "w");
+    if (!lf) {
+        const char *tmp = getenv("TMPDIR");
+        snprintf(log, sizeof(log), "%s/TimeCodeStudio-launch.log", tmp ? tmp : "/tmp");
+        lf = fopen(log, "w");
+    }
+    if (lf) {
+        dup2(fileno(lf), STDOUT_FILENO);
+        dup2(fileno(lf), STDERR_FILENO);
+    }
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
+    if (!has_main(root)) {
+        fprintf(stderr, "[fatal] main.py not found; ROOT=%s (baked=%s)\n", root, DEF_ROOT);
+        if (lf) fclose(lf);
+        return 1;
+    }
+
+    /* 宿主不在 framework 目录内，Python 无法自行推断 prefix，必须显式指定 */
+    if (is_dir(DEF_HOME)) {
+        setenv("PYTHONHOME", DEF_HOME, 1);
+    } else {
+        fprintf(stderr, "[warn] PYTHONHOME not found: %s\n", DEF_HOME);
+    }
+    if (is_dir(DEF_SITE)) setenv("PYTHONPATH", DEF_SITE, 1);
+    setenv("PYTHONDONTWRITEBYTECODE", "1", 0);
+    if (chdir(root) != 0) { /* 失败不致命，路径都是绝对的 */ }
+
+    /* 自检模式：只验证解释器能起来，不开窗口（供 build_app.sh 构建后校验） */
+    if (getenv("TCS_SELFTEST")) {
+        if (saved_out >= 0) dup2(saved_out, STDOUT_FILENO);
+        if (saved_err >= 0) dup2(saved_err, STDERR_FILENO);
+        char *t[3];
+        t[0] = exe;
+        t[1] = "-c";
+        t[2] = "import sys; print('selftest-ok', sys.version.split()[0])";
+        return Py_BytesMain(3, t);
+    }
+
+    /* .venv 被删/依赖缺失时，交给 launcher 脚本回退到外部解释器并自动装依赖，
+       否则会静默启动失败（用户只看到"双击没反应"） */
+    if (!is_dir(DEF_SITE)) {
+        char lb[PATH_MAX];
+        snprintf(lb, sizeof(lb), "%s", exe);
+        up(lb);                       /* 去掉文件名，得到 Contents/MacOS */
+        strncat(lb, "/launcher", sizeof(lb) - strlen(lb) - 1);
+        fprintf(stderr, "[warn] site-packages missing, falling back to %s\n", lb);
+        if (lf) { fclose(lf); lf = NULL; }
+        execl("/bin/bash", "bash", lb, (char *)NULL);
+        /* execl 失败则继续，由下面的 Python 启动报错 */
+    }
+
+    char **nargv = calloc((size_t)argc + 2, sizeof(char *));
+    if (!nargv) return 1;
+    static char script[PATH_MAX];
+    snprintf(script, sizeof(script), "%s/main.py", root);
+    int n = 0;
+    nargv[n++] = exe;
+    nargv[n++] = script;
+    for (int i = 1; i < argc; i++) nargv[n++] = argv[i];
+    nargv[n] = NULL;
+
+    fprintf(stderr, "[launch] root=%s home=%s site=%s\n", root, DEF_HOME, DEF_SITE);
+    int rc = Py_BytesMain(n, nargv);
+    fprintf(stderr, "[exit] code=%d\n", rc);
+
+    /* 启动失败时给用户可见反馈（弹窗文本用 ASCII：osascript 传中文在部分区域会乱码） */
+    if (rc != 0 && !getenv("TCS_NO_ALERT")) {
+        char cmd[PATH_MAX * 3];
+        snprintf(cmd, sizeof(cmd),
+            "/usr/bin/osascript -e 'display alert \"TimeCode Studio\" "
+            "message \"Failed to start (exit %d). The log will open for details.\" "
+            "buttons {\"OK\"} default button 1' >/dev/null 2>&1; "
+            "/usr/bin/open -e \"%s\" >/dev/null 2>&1 || /usr/bin/open -t \"%s\" >/dev/null 2>&1",
+            rc, log, log);
+        if (system(cmd) != 0) { /* 弹窗失败不影响退出码 */ }
+    }
+    return rc;
+}
+HOSTC
 
     ARCHS="$(lipo -archs "$PY_DYLIB" 2>/dev/null || echo arm64)"
     CLANG_ARGS=""
@@ -110,7 +244,7 @@ alert() {
 }
 
 # 优先：app 内嵌的 Python 宿主（进程归属本 app，菜单栏名称正确）
-HOST="$DIR/TimeCode Studio.app/Contents/MacOS/TimeCodeStudio"
+HOST="$(cd "$(dirname "$0")" && pwd)/TimeCodeStudio"
 if [ -x "$HOST" ] && [ -f "$HOST" ] && [ -n "$PY_HOME" ] && [ -d "$PY_SITE" ]; then
     export PYTHONHOME="$PY_HOME"
     export PYTHONPATH="$PY_SITE"
@@ -230,3 +364,18 @@ else
     echo "      功能可用，但菜单栏可能仍显示 Python，且可能被要求安装 Rosetta。"
 fi
 echo "双击即可运行（不弹终端）。日志：$ROOT/launch.log"
+
+# ---------------- 构建后自检 ----------------
+# 用"近似 Finder"的空环境直接执行主可执行文件，验证它不依赖 launcher 也能起来。
+# 这正是"双击无反应"这类问题的根因所在，必须在构建时就拦住。
+if [ "$EXEC_NAME" = "TimeCodeStudio" ]; then
+    SELFTEST_OUT="$(env -i HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" TCS_SELFTEST=1 \
+        "$CONTENTS/MacOS/TimeCodeStudio" 2>&1 || true)"
+    if printf '%s' "$SELFTEST_OUT" | grep -q "selftest-ok"; then
+        echo "自检通过：主可执行文件在空环境下可独立启动 Python"
+    else
+        echo "自检失败：主可执行文件无法独立启动，双击会失败。输出："
+        printf '%s\n' "$SELFTEST_OUT" | head -15
+        exit 1
+    fi
+fi
