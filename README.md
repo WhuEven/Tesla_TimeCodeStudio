@@ -54,6 +54,10 @@ python3 -m venv .venv
 （脚本会把项目根目录写进启动器）。
 启动日志写在项目根目录的 `launch.log`，异常退出时会弹窗提示。
 
+> 构建时会用 `clang` 编译一个原生启动器（arm64 + x86_64 universal），
+> app 因此具备真实的可执行文件架构，**Apple Silicon 上不会被要求安装 Rosetta**。
+> 系统缺少 Command Line Tools（无 clang）时会回退成脚本启动器。
+
 `run.command` 保留为排错入口（会用终端启动，方便看报错），
 没有 `.app` 时会自动构建并打开它。
 

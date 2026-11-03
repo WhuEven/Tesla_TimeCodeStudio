@@ -7,6 +7,10 @@
 # 用法：  ./build_app.sh
 # 产物：  ./TimeCode Studio.app   （双击即可运行）
 # 排错：  运行日志在项目根目录 launch.log
+#
+# 说明：主可执行文件优先编译成原生 Mach-O 启动器（arm64 + x86_64）。
+# 若只用 shell 脚本作主可执行文件，LaunchServices 无法判断架构，
+# 在 Apple Silicon 上会误判为 Intel 应用并索要 Rosetta。
 
 set -e
 cd "$(dirname "$0")" || exit 1
@@ -18,37 +22,7 @@ CONTENTS="$APP/Contents"
 rm -rf "$APP"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 
-# ---------------- Info.plist ----------------
-cat > "$CONTENTS/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleName</key>
-    <string>TimeCode Studio</string>
-    <key>CFBundleDisplayName</key>
-    <string>TimeCode Studio</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.whueven.timecodestudio</string>
-    <key>CFBundleVersion</key>
-    <string>1.0</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
-    <key>CFBundleExecutable</key>
-    <string>launcher</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>LSApplicationCategoryType</key>
-    <string>public.app-category.video</string>
-</dict>
-</plist>
-PLIST
-
-# ---------------- 启动器 ----------------
+# ---------------- 启动器脚本 ----------------
 # 注意：弹窗文本一律使用 ASCII 英文。
 # osascript 从 shell 接收 UTF-8 中文时，在部分系统区域设置下会显示成乱码。
 {
@@ -101,6 +75,10 @@ if ! "$PY" -c "import PySide6, fontTools, imageio_ffmpeg" >>"$LOG" 2>&1; then
 fi
 
 # 3) 启动图形界面
+if [ -n "$TCS_DRYRUN" ]; then      # 自检用：只验证解释器与路径，不真正开窗口
+    echo "dry-run: would start $PY $DIR/main.py" >> "$LOG"
+    exit 0
+fi
 "$PY" "$DIR/main.py" >>"$LOG" 2>&1
 code=$?
 if [ $code -ne 0 ]; then
@@ -110,6 +88,85 @@ fi
 SH
 } > "$CONTENTS/MacOS/launcher"
 chmod +x "$CONTENTS/MacOS/launcher"
+
+# ---------------- 原生启动器（规避 Rosetta 误判） ----------------
+EXEC_NAME="launcher"
+BIN="$CONTENTS/MacOS/TimeCodeStudio"
+if command -v clang >/dev/null 2>&1; then
+    STUB_SRC="$CONTENTS/MacOS/__stub.c"
+    cat > "$STUB_SRC" <<'C'
+/* 原生启动器：exec 同目录下的 launcher 脚本。
+   存在的意义是让 .app 拥有真正的 Mach-O 可执行文件，架构可被系统识别，
+   否则纯脚本 bundle 在 Apple Silicon 上会被要求安装 Rosetta。 */
+#include <mach-o/dyld.h>
+#include <libgen.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <limits.h>
+
+int main(void) {
+    char exe[PATH_MAX];
+    uint32_t size = sizeof(exe);
+    if (_NSGetExecutablePath(exe, &size) != 0) return 1;
+
+    char dirbuf[PATH_MAX];
+    strncpy(dirbuf, exe, sizeof(dirbuf) - 1);
+    dirbuf[sizeof(dirbuf) - 1] = '\0';
+    const char *dir = dirname(dirbuf);
+
+    char script[PATH_MAX];
+    int n = snprintf(script, sizeof(script), "%s/launcher", dir);
+    if (n <= 0 || n >= (int)sizeof(script)) return 1;
+
+    execl("/bin/bash", "bash", script, (char *)NULL);
+    return 1;
+}
+C
+    if clang -O2 -arch arm64 -arch x86_64 -o "$BIN" "$STUB_SRC" 2>/dev/null \
+       || clang -O2 -arch arm64 -o "$BIN" "$STUB_SRC" 2>/dev/null; then
+        EXEC_NAME="TimeCodeStudio"
+        chmod +x "$BIN"
+    fi
+    rm -f "$STUB_SRC"
+fi
+
+# ---------------- Info.plist ----------------
+cat > "$CONTENTS/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>TimeCode Studio</string>
+    <key>CFBundleDisplayName</key>
+    <string>TimeCode Studio</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.whueven.timecodestudio</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleExecutable</key>
+    <string>${EXEC_NAME}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>LSArchitecturePriority</key>
+    <array>
+        <string>arm64</string>
+        <string>x86_64</string>
+    </array>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.video</string>
+</dict>
+</plist>
+PLIST
 
 # ---------------- 图标：png -> iconset -> icns ----------------
 if [ -f "$ROOT/assets/AppIcon.png" ] && command -v iconutil >/dev/null 2>&1; then
@@ -127,5 +184,13 @@ fi
 # 去掉隔离属性，避免首次双击被 Gatekeeper 拦下
 xattr -cr "$APP" 2>/dev/null || true
 
+# 刷新 LaunchServices 缓存，避免沿用旧的"需要 Rosetta"判定
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+[ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$APP" >/dev/null 2>&1 || true
+
 echo "已生成：$APP"
+echo "主可执行文件：Contents/MacOS/$EXEC_NAME"
+[ "$EXEC_NAME" = "TimeCodeStudio" ] \
+    && echo "（原生 $(lipo -archs "$BIN" 2>/dev/null) 启动器）" \
+    || echo "（警告：未找到 clang，回退为脚本启动器，可能仍会被要求安装 Rosetta）"
 echo "双击即可运行（不弹终端）。日志：$ROOT/launch.log"
