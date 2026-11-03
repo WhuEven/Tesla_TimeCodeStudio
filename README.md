@@ -54,9 +54,17 @@ python3 -m venv .venv
 （脚本会把项目根目录写进启动器）。
 启动日志写在项目根目录的 `launch.log`，异常退出时会弹窗提示。
 
-> 构建时会用 `clang` 编译一个原生启动器（arm64 + x86_64 universal），
-> app 因此具备真实的可执行文件架构，**Apple Silicon 上不会被要求安装 Rosetta**。
-> 系统缺少 Command Line Tools（无 clang）时会回退成脚本启动器。
+构建时会做两件关键的事：
+
+- 用 `clang` 编译一个**原生宿主二进制**，直接链接 Python 动态库并调用
+  `Py_BytesMain`（Python 与库文件一并放进 `Contents/`）。这样进程属于本 app，
+  **菜单栏和 Dock 显示的是 "TimeCode Studio" 而不是 "Python"**；
+  也不可能被误判成 Intel 应用去索要 Rosetta。
+- 由 `assets/AppIcon.png` 生成完整的 `icns`（16–512 全部 1x/2x 尺寸，
+  缺一档 Finder 就会显示空白图标）。
+
+系统缺少 Command Line Tools（无 clang）或找不到 Python framework 时，
+会自动回退成脚本启动器：功能照常，但菜单栏会显示 Python。
 
 `run.command` 保留为排错入口（会用终端启动，方便看报错），
 没有 `.app` 时会自动构建并打开它。

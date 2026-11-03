@@ -965,9 +965,18 @@ class MainWindow(QMainWindow):
 
 def run():
     import sys
+    from pathlib import Path
+
+    from PySide6.QtGui import QIcon
 
     app = QApplication(sys.argv)
     app.setApplicationName("TimeCode Studio")
+    app.setApplicationDisplayName("TimeCode Studio")
+    app.setOrganizationName("Haonan Zhu")
+    # 窗口 / 任务栏图标（macOS 由 .app 的 Info.plist 决定，这里兼顾 Windows）
+    icon_path = Path(__file__).resolve().parent.parent / "assets" / "AppIcon.png"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
