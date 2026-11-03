@@ -9,7 +9,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QSettings, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap, QIntValidator
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
@@ -182,6 +182,12 @@ class MainWindow(QMainWindow):
         self._loc_auto = True        # 地点是否仍由程序自动填写（用户改过则不再覆盖）
         self.fontgen_done = False
 
+        # 上一次使用的目录（导入 / 导出各记一份），跨会话持久化；
+        # 清空列表也刻意不动它——下次导入仍然从上次的素材目录打开。
+        self._settings = QSettings("HaonanZhu", "TimeCodeStudio")
+        self._last_import_dir = self._restore_dir("import")
+        self._last_export_dir = self._restore_dir("export")
+
         self.setWindowTitle("TimeCode Studio — 行车记录仪 / 监控时间码工具")
         self.resize(1280, 800)
         self._build_ui()
@@ -253,9 +259,12 @@ class MainWindow(QMainWindow):
         self.table.customContextMenuRequested.connect(self._table_menu)
         lv.addWidget(self.table)
 
-        hint = QLabel("勾选「拼接」列决定哪些片段参与导出 · 列表顺序即拼接顺序（↑↓ 可调）")
+        hint = QLabel()
         hint.setStyleSheet("color:#888;font-size:11px;")
+        hint.setWordWrap(True)
+        self.lbl_hint = hint
         lv.addWidget(hint)
+        self._update_dir_hint()
 
         # ---- 右侧：设置 ----
         right = QWidget(); rv = QVBoxLayout(right)
@@ -348,17 +357,65 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"ffmpeg: {self.ffmpeg or '未找到'}" + ("（含 ffprobe）" if self.probe_bin else "（用 ffmpeg 探测媒体信息）"))
 
+    # ---------------- 目录记忆 ----------------
+    def _restore_dir(self, key: str) -> Path | None:
+        """从偏好设置读回上次目录（不存在则视为没有）。"""
+        raw = self._settings.value(f"paths/{key}", "")
+        p = Path(str(raw)) if raw else None
+        return p if p and p.is_dir() else None
+
+    def _default_dir(self, key: str) -> str:
+        """文件对话框起始目录：优先上次用过的目录，其次系统默认。"""
+        p = self._last_export_dir if key == "export" else self._last_import_dir
+        if p and Path(p).is_dir():
+            return str(p)
+        return str(Path.home() / "Desktop") if key == "export" else ""
+
+    def _remember_dir(self, key: str, raw):
+        """记住本次打开的目录（传文件则记其所在文件夹）。
+
+        该状态与片段列表完全解耦：清空列表、导出完成都不会清掉它。
+        """
+        if not raw:
+            return
+        p = Path(raw)
+        try:
+            if p.is_file():
+                p = p.parent
+            if not p.is_dir():
+                return
+        except OSError:
+            return
+        if key == "export":
+            self._last_export_dir = p
+        else:
+            self._last_import_dir = p
+        self._settings.setValue(f"paths/{key}", str(p))
+        self._settings.sync()
+        self._update_dir_hint()
+
+    def _update_dir_hint(self):
+        d = self._default_dir("import")
+        self.lbl_hint.setText(
+            "勾选「拼接」列决定哪些片段参与导出 · 列表顺序即拼接顺序（↑↓ 可调）\n"
+            f"下次导入默认打开：{d or '系统默认目录'}")
+
     # ---------------- 导入 ----------------
     def import_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "选择视频文件", "",
-                                                "视频文件 (*.mp4 *.mov *.m4v *.avi *.mkv *.ts);;所有文件 (*)")
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "选择视频文件", self._default_dir("import"),
+            "视频文件 (*.mp4 *.mov *.m4v *.avi *.mkv *.ts);;所有文件 (*)")
         if files:
+            self._remember_dir("import", files[0])
             self._import(files)
 
     def import_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "选择文件夹（如 TeslaCam/SavedClips 或事件目录）")
+        d = QFileDialog.getExistingDirectory(
+            self, "选择文件夹（如 TeslaCam/SavedClips 或事件目录）",
+            self._default_dir("import"))
         if not d:
             return
+        self._remember_dir("import", d)
         root = Path(d)
         files = sorted(p for p in root.rglob("*") if p.suffix.lower() in VIDEO_EXT)
         if not files:
@@ -447,9 +504,11 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
 
     def _drop(self, event):
-        files = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
-        dirs = [f for f in files if Path(f).is_dir()]
-        files = [f for f in files if Path(f).is_file()]
+        dropped = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+        dirs = [f for f in dropped if Path(f).is_dir()]
+        files = [f for f in dropped if Path(f).is_file()]
+        if dropped:
+            self._remember_dir("import", dropped[0])
         for d in dirs:
             files += [str(p) for p in Path(d).rglob("*") if p.suffix.lower() in VIDEO_EXT]
         if files:
@@ -846,10 +905,12 @@ class MainWindow(QMainWindow):
         suffix = f"-{first.view}" if first.view else ""
         base = first.start_dt.strftime("%Y%m%d_%H%M%S") if first.start_dt else "export"
         out, _ = QFileDialog.getSaveFileName(
-            self, "保存导出文件", str(Path.home() / "Desktop" / f"TC_{base}{suffix}.mp4"),
+            self, "保存导出文件",
+            str(Path(self._default_dir("export")) / f"TC_{base}{suffix}.mp4"),
             "MP4 视频 (*.mp4)")
         if not out:
             return
+        self._remember_dir("export", Path(out).parent)
         work = Path(tempfile.mkdtemp(prefix="tcs_export_"))
         fonts = work / "fonts"; fonts.mkdir()
         fpath = self.cmb_font.currentData()
