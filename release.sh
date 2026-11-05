@@ -25,6 +25,8 @@ mkdir -p dist
     echo
     echo "macOS 应用包（Apple Silicon / macOS 11+），已内嵌 Python、PySide6 与 ffmpeg，**无需安装环境**。"
     echo
+    echo "> Intel Mac 暂无预编译包，请按 README 的「从源码运行」方式使用。"
+    echo
     echo "### 安装"
     echo
     echo '1. 下载 `'"$(basename "$ZIP")"'`，双击解压'
@@ -50,13 +52,19 @@ mkdir -p dist
 echo "分发包：$ZIP"
 echo "校验值：$SHA"
 
+# gh 可能被装在 ~/.local/bin（无 brew / 无管理员权限时的安装位置），补进查找范围
+if ! command -v gh >/dev/null 2>&1 && [ -x "$HOME/.local/bin/gh" ]; then
+    PATH="$HOME/.local/bin:$PATH"
+fi
+
 if ! command -v gh >/dev/null 2>&1; then
     echo
     echo "未安装 gh，未自动创建 Release。手动步骤："
     echo "  1) 打开 https://github.com/WhuEven/Tesla_TimeCodeStudio/releases/new"
     echo "  2) Tag 选 $TAG（不存在就先推：git push origin $TAG）"
     echo "  3) 把 $ZIP 拖进附件区，正文粘贴 $NOTES 的内容"
-    echo "  或安装 gh 后重跑本脚本：brew install gh && gh auth login"
+    echo "  或安装 gh 后重跑本脚本：brew install gh && gh auth login
+  （没有 brew 时：下载官方 zip，把 bin/gh 放到 ~/.local/bin，再 gh auth login --web）"
     exit 0
 fi
 

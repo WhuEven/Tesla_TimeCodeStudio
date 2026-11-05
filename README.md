@@ -80,6 +80,12 @@ python3 -m venv .venv
 打包成 `dist/TimeCodeStudio-<版本>-macOS-arm64.zip`（约 70 MB，解压约 190 MB）。
 版本号可用 `TCS_VERSION=1.0.1 ./build_app.sh --dist` 覆盖。
 
+一条命令完成发版（构建 → 打 tag → 创建 Release 并上传附件）：
+
+```bash
+TCS_VERSION=1.0.1 ./release.sh   # 需要 gh 且已 gh auth login
+```
+
 构建时会做两件关键的事：
 
 - 用 `clang` 编译一个**原生宿主二进制**，直接链接 Python 动态库并调用
