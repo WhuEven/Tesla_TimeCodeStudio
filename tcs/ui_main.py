@@ -443,12 +443,12 @@ class MainWindow(QMainWindow):
             except Exception:
                 skipped += 1
                 continue
-            if info.duration <= 0:
+            if info.video_length <= 0:
                 skipped += 1
                 continue
             clip = Clip.from_path(pp)
             clip.info = info
-            clip.out_point = info.duration
+            clip.out_point = info.video_length
             self.project.clips.append(clip)
             new_clips.append(clip)
             exist.add(str(pp))

@@ -94,10 +94,7 @@ def build_plan(project: Project, settings: ExportSettings, style: OSSStyle,
             c.start_dt = c.start_dt or mapping.get(id(c)) or c.start_dt
 
     out_w, out_h = resolve_output_size(project, settings)
-    fps, need_fps = resolve_output_fps(project, settings)
-
-    same_size = all(c.info.width == out_w and c.info.height == out_h for c in order)
-    target_hw = (out_w, out_h)
+    fps, _need_fps = resolve_output_fps(project, settings)
 
     any_audio = settings.include_audio and any(c.info.has_audio for c in order)
     segs = []
@@ -107,15 +104,31 @@ def build_plan(project: Project, settings: ExportSettings, style: OSSStyle,
     for i, c in enumerate(order):
         vin = f"[v{i}]"
         sin = f"[{i}:v]"
+
+        # ---- 时间窗对齐到帧边界 -------------------------------------
+        # concat 以"较长的那一路"作为该段结束：音轨只要比视频长一点，
+        # 视频末帧就会被反复复制，拼接点出现定格（用户感知为丢帧）。
+        # 因此这里做两件事：
+        #   1) 用视频流真实长度（按帧数算）而不是容器时长，且入出点吸附到帧边界，
+        #      保证每段帧数完全确定；
+        #   2) 音频比视频提前 2ms 结束，让 concat 永远以视频为准收尾。
+        vlen = c.info.video_length or c.info.duration
+        in_pt = max(0.0, min(c.in_point, max(0.0, vlen - 1.0 / fps)))
+        out_pt = min(c.out_point, vlen)
+        in_f = int(round(in_pt * fps))
+        out_f = int(round(out_pt * fps))
+        if out_f <= in_f:
+            out_f = in_f + 1
+        in_pt = in_f / fps
+        out_pt = out_f / fps
+        guard = 0.002                     # 音频提前收尾的余量（秒）
+
         chain = [f"{sin}"]
-        in_pt, out_pt = max(0.0, c.in_point), min(c.out_point, c.info.duration)
-        trim = []
-        if in_pt > 0.01:
-            trim.append(f"start={in_pt:.3f}")
-        if out_pt < c.info.duration - 0.01:
-            trim.append(f"end={out_pt:.3f}")
-        if trim:
-            chain.append("trim=" + ":".join(trim))
+        # 始终显式给出时间窗：不依赖输入文件的时间戳是否从 0 开始
+        chain.append(f"trim=start={in_pt:.6f}:end={out_pt:.6f}")
+        chain.append("setpts=PTS-STARTPTS")
+        # 统一帧率后帧数才确定；即使不需要转换也做一次，顺带归一化 VFR 素材
+        chain.append(f"fps={fps:.6f}")
         chain.append("setpts=PTS-STARTPTS")
         if c.info.width != out_w or c.info.height != out_h:
             chain.append(
@@ -125,8 +138,6 @@ def build_plan(project: Project, settings: ExportSettings, style: OSSStyle,
                 f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black"
             )
         chain.append("setsar=1")
-        if need_fps:
-            chain.append(f"fps={fps:.6f}")
         chain.append("format=yuv420p")
         # 注意：某些 ffmpeg build 不接受 "[0:v]," 开头的写法，
         # 标签后必须直接连接第一个滤镜，不能用逗号过渡
@@ -134,23 +145,18 @@ def build_plan(project: Project, settings: ExportSettings, style: OSSStyle,
 
         if any_audio:
             ain = f"[a{i}]"
+            a_end = max(in_pt + 0.001, out_pt - guard)
             if c.info.has_audio:
                 ach = [f"[{i}:a]"]
-                atrim = []
-                if in_pt > 0.01:
-                    atrim.append(f"start={in_pt:.3f}")
-                if out_pt < c.info.duration - 0.01:
-                    atrim.append(f"end={out_pt:.3f}")
-                if atrim:
-                    ach.append("atrim=" + ":".join(atrim))
+                ach.append(f"atrim=start={in_pt:.6f}:end={a_end:.6f}")
                 ach.append("asetpts=PTS-STARTPTS")
                 ach.append("aresample=48000")
                 ach.append("aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo")
                 lines.append(ach[0] + ",".join(ach[1:]) + ain)
             else:
-                dur = out_pt - in_pt
+                dur = a_end - in_pt
                 lines.append(
-                    f"anullsrc=r=48000:cl=stereo,atrim=0:{dur:.3f},"
+                    f"anullsrc=r=48000:cl=stereo,atrim=0:{dur:.6f},"
                     "asetpts=PTS-STARTPTS,"
                     "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo" + ain
                 )

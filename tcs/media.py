@@ -160,21 +160,83 @@ def _probe_ffmpeg(ffmpeg: str, path: Path) -> MediaInfo:
     return info
 
 
+_FRAME_COUNT_CACHE: dict[tuple[str, int, int], tuple[int, float]] = {}
+
+
+def count_video_frames(ffmpeg: str, path: Path) -> tuple[int, float]:
+    """统计视频流帧数与末帧结束时刻（只解复用、不解码，通常几十毫秒）。
+
+    返回 ``(帧数, 时长)``。容器时长可能因音轨比视频长而偏大，
+    按帧数算出的时长才是视频流真实长度。
+    """
+    path = Path(path)
+    try:
+        key = (str(path), path.stat().st_size, int(path.stat().st_mtime))
+    except OSError:
+        return 0, 0.0
+    if key in _FRAME_COUNT_CACHE:
+        return _FRAME_COUNT_CACHE[key]
+
+    frames, last_time = 0, 0.0
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-hide_banner", "-nostdin", "-i", str(path),
+             "-map", "0:v:0", "-c", "copy", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=300, errors="replace",
+        )
+        for line in proc.stderr.splitlines():
+            if "frame=" not in line:
+                continue
+            mf = re.search(r"frame=\s*(\d+)", line)
+            if mf:
+                frames = int(mf.group(1))
+            mt = re.search(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", line)
+            if mt:
+                h, mi, s = mt.groups()
+                last_time = int(h) * 3600 + int(mi) * 60 + float(s)
+    except Exception:
+        frames, last_time = 0, 0.0
+
+    result = (frames, last_time)
+    _FRAME_COUNT_CACHE[key] = result
+    return result
+
+
 def probe(path: str | Path) -> MediaInfo:
     """探测媒体文件。失败时抛异常，由调用方决定是否跳过。"""
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(path)
     ffprobe = find_ffprobe()
+    info = None
     if ffprobe:
         try:
-            return _probe_ffprobe(ffprobe, path)
+            info = _probe_ffprobe(ffprobe, path)
         except Exception:
-            pass
+            info = None
+    if info is None:
+        ffmpeg = find_ffmpeg()
+        if not ffmpeg:
+            raise RuntimeError("找不到 ffmpeg/ffprobe，请先安装 ffmpeg")
+        info = _probe_ffmpeg(ffmpeg, path)
+
+    _fill_video_length(info, path)
+    return info
+
+
+def _fill_video_length(info: MediaInfo, path: Path) -> None:
+    """补上视频流的真实帧数与时长（拼接以视频为准）。"""
+    if info.width <= 0:
+        return
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
-        raise RuntimeError("找不到 ffmpeg/ffprobe，请先安装 ffmpeg")
-    return _probe_ffmpeg(ffmpeg, path)
+        return
+    frames, last_time = count_video_frames(ffmpeg, path)
+    info.frame_count = frames
+    if frames > 0 and info.fps > 0:
+        info.video_duration = frames / info.fps
+    elif last_time > 0:
+        info.video_duration = last_time
 
 
 def extract_frame(ffmpeg: str, path: Path, at: float, out_png: Path,

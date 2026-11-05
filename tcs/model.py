@@ -54,7 +54,9 @@ def human_size(num_bytes: float) -> str:
 class MediaInfo:
     """ffprobe / ffmpeg 探测出的流信息。"""
 
-    duration: float = 0.0
+    duration: float = 0.0           # 容器时长（含音轨可能多出的部分）
+    video_duration: float = 0.0     # 视频流真实时长（按帧数算，拼接以此为准）
+    frame_count: int = 0            # 视频帧数
     width: int = 0
     height: int = 0
     fps: float = 0.0
@@ -68,6 +70,16 @@ class MediaInfo:
     @property
     def aspect(self) -> float:
         return self.width / self.height if self.height else 16 / 9
+
+    @property
+    def video_length(self) -> float:
+        """拼接/截取应采用的时长。
+
+        容器时长取的是音视频两路里较长的那一路；音轨往往比视频长几十毫秒，
+        用容器时长当视频长度会让 concat 在段末反复复制最后一帧（拼接点卡顿）。
+        因此优先使用按帧数算出的视频流长度。
+        """
+        return self.video_duration if self.video_duration > 0 else self.duration
 
 
 @dataclass
@@ -96,12 +108,12 @@ class Clip:
     # ---- 派生属性 -------------------------------------------------
     @property
     def duration(self) -> float:
-        return self.info.duration
+        return self.info.video_length
 
     @property
     def clip_duration(self) -> float:
         """截取后的有效时长。"""
-        d = self.info.duration
+        d = self.info.video_length
         if d <= 0:
             return 0.0
         return max(0.0, min(self.out_point, d) - max(0.0, self.in_point))
@@ -202,10 +214,10 @@ class Project:
             except Exception:
                 skipped += 1
                 continue
-            if clip.info.duration <= 0:
+            if clip.info.video_length <= 0:
                 skipped += 1
                 continue
-            clip.out_point = clip.info.duration
+            clip.out_point = clip.info.video_length
             self.clips.append(clip)
             exist.add(str(p))
             added += 1
