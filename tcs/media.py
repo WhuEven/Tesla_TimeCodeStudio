@@ -179,14 +179,14 @@ def count_video_frames(ffmpeg: str, path: Path) -> tuple[int, float]:
 
     frames, last_time = 0, 0.0
     try:
-        # -progress 的 key=value 输出是跨版本稳定的机器可读格式；
-        # ffmpeg 9 起 stderr 上的经典 stats 行不可靠（且 `-c copy` 到 null
-        # 时其 time= 还会把封装器给视频流的起点偏移算进去），所以以
-        # -progress 为主、stderr stats 为兜底。
+        # 用 -progress 的 key=value 机器可读输出统计。注意 -progress 在
+        # 6.x 里是「输出选项」，必须放在输出参数前面（7+ 才同时接受全局
+        # 位置）；ffmpeg 9 起 stderr 经典 stats 行不可靠，且 `-c copy` 到
+        # null 时其 time= 还会把封装器给视频流的起点偏移算进去。
         proc = subprocess.run(
             [ffmpeg, "-hide_banner", "-nostdin", "-nostats",
-             "-progress", "pipe:1", "-i", str(path),
-             "-map", "0:v:0", "-c", "copy", "-f", "null", "-"],
+             "-i", str(path), "-map", "0:v:0", "-c", "copy",
+             "-progress", "pipe:1", "-f", "null", "-"],
             capture_output=True, text=True, timeout=300, errors="replace",
         )
         text = f"{proc.stdout or ''}\n{proc.stderr or ''}"
@@ -196,7 +196,11 @@ def count_video_frames(ffmpeg: str, path: Path) -> tuple[int, float]:
                 mf = re.search(r"frame=\s*(\d+)", line)
                 if mf:
                     frames = max(frames, int(mf.group(1)))
-            if "time=" in line:
+            mu = re.search(r"^out_time_us=(\d+)", line)
+            if mu:
+                last_time = max(last_time, int(mu.group(1)) / 1e6)
+                continue
+            if "time=" in line and not line.startswith("out_time"):
                 mt = re.search(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", line)
                 if mt:
                     h, mi, s = mt.groups()
@@ -204,6 +208,22 @@ def count_video_frames(ffmpeg: str, path: Path) -> tuple[int, float]:
                                     int(h) * 3600 + int(mi) * 60 + float(s))
     except Exception:
         frames, last_time = 0, 0.0
+
+    if frames == 0:
+        # 兜底：ffprobe 逐帧计数（要解码，慢一些但跨版本行为一致）。
+        ffprobe = find_ffprobe()
+        if ffprobe:
+            try:
+                raw = subprocess.run(
+                    [ffprobe, "-v", "error", "-select_streams", "v:0",
+                     "-count_frames", "-show_entries", "stream=nb_read_frames",
+                     "-of", "default=nw=1:nk=1", str(path)],
+                    capture_output=True, text=True, timeout=300,
+                ).stdout.strip()
+                if raw.isdigit():
+                    frames = int(raw)
+            except Exception:
+                pass
 
     result = (frames, last_time)
     _FRAME_COUNT_CACHE[key] = result
