@@ -190,12 +190,18 @@ def build_plan(project: Project, settings: ExportSettings, style: OSSStyle,
         vlabel = "[vout]"
 
     script = work_dir / "filter.txt"
-    script.write_text(";\n".join(lines) + "\n", encoding="utf-8")
+    graph = ";\n".join(lines) + "\n"
+    script.write_text(graph, encoding="utf-8")
 
     cmd = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "warning", "-y"]
     for c in order:
         cmd += ["-i", str(c.path)]
-    cmd += ["-filter_complex_script", str(script), "-map", vlabel]
+    # 滤镜图内联传给 -filter_complex：所有 ffmpeg 版本都支持。
+    # 不能用 -filter_complex_script —— 该选项在 7.x 弃用、9.0 已移除
+    # （CI 的 ffmpeg 9 上报 "Unrecognized option"，退出码 8）。
+    # 我们以 argv 列表调用、不经 shell，长参数在三大平台都安全；
+    # filter.txt 仍然写盘，便于排错时核对最终滤镜图。
+    cmd += ["-filter_complex", graph, "-map", vlabel]
     if any_audio:
         cmd += ["-map", "[ac]"]
 
