@@ -1,6 +1,6 @@
 # 时间码拼接工具依赖
 # 注意：PySide6 6.11+ 要求 Python >= 3.10，Python 3.9 只能装 6.9/6.10 系列
-PySide6>=6.6; python_version >= "3.10"
+PySide6>=6.12.0; python_version >= "3.10"
 PySide6>=6.6,<6.11; python_version < "3.10"
 fonttools>=4.40
 imageio-ffmpeg>=0.4.9
