@@ -22,8 +22,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 作者本机（Apple CLT）就是 3.9，必须保证仍能跑
-          - os: ubuntu-latest
+          # 作者本机（Apple CLT）就是 3.9，必须保证仍能跑。
+          # 注意 ubuntu-latest 已是 26.04，不再提供 3.9，固定用 24.04
+          - os: ubuntu-24.04
             python: "3.9"
           - os: ubuntu-latest
             python: "3.12"

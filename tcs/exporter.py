@@ -242,6 +242,7 @@ class ExportRunner:
         self.on_log = on_log or (lambda line: None)
         self.proc: subprocess.Popen | None = None
         self.cancelled = False
+        self.log_tail: list[str] = []     # 最近若干行日志，失败时随异常抛出
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -273,12 +274,16 @@ class ExportRunner:
                 self.on_progress(1.0)
             elif line:
                 self.on_log(line)
+                self.log_tail.append(line)
+                if len(self.log_tail) > 30:
+                    self.log_tail.pop(0)
         rc = self.proc.wait()
         if self.proc.stdout is not None:
             self.proc.stdout.close()      # 及时释放管道，避免 ResourceWarning
         if self.cancelled:
             raise InterruptedError("已取消")
         if rc != 0 or not plan.output.exists():
-            raise RuntimeError(f"ffmpeg 退出码 {rc}，导出失败（详见日志）")
+            tail = "\n".join(self.log_tail[-15:])
+            raise RuntimeError(f"ffmpeg 退出码 {rc}，导出失败。最后日志：\n{tail}")
         self.on_progress(1.0)
         return plan.output
