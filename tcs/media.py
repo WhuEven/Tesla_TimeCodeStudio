@@ -165,9 +165,52 @@ _FRAME_COUNT_CACHE: dict[tuple[str, int, int], tuple[int, float]] = {}
 FRAME_COUNT_DEBUG = ""
 
 
+def _parse_progress(text: str) -> tuple[int, float]:
+    """从 -progress / stderr 混合输出里取 (最大 frame=, 最末 out_time)。"""
+    frames, last_time = 0, 0.0
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("frame="):
+            mf = re.search(r"frame=\s*(\d+)", line)
+            if mf:
+                frames = max(frames, int(mf.group(1)))
+        mu = re.search(r"^out_time_us=(\d+)", line)
+        if mu:
+            last_time = max(last_time, int(mu.group(1)) / 1e6)
+            continue
+        if "time=" in line and not line.startswith("out_time"):
+            mt = re.search(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", line)
+            if mt:
+                h, mi, s = mt.groups()
+                last_time = max(last_time,
+                                int(h) * 3600 + int(mi) * 60 + float(s))
+    return frames, last_time
+
+
+def _run_demux(ffmpeg: str, path: Path, decode: bool) -> tuple[int, float, str]:
+    """跑一遍统计命令，返回 (帧数, 时长, 输出采样)。decode=True 时真实解码。
+
+    注意：``-progress`` 在 6.x 是「输出选项」，必须放在输出参数前；
+    ffmpeg 7.0 的 stream-copy 场景 progress 里没有 frame= 行（7.1 修复），
+    9.x 的 stderr stats 同样不可靠 —— 所以拿不到帧数时换策略重试。
+    """
+    cmd = [ffmpeg, "-hide_banner", "-nostdin", "-nostats",
+           "-i", str(path), "-map", "0:v:0"]
+    if not decode:
+        cmd += ["-c", "copy"]
+    cmd += ["-progress", "pipe:1", "-f", "null", "-"]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300,
+                          errors="replace")
+    text = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+    frames, last_time = _parse_progress(text)
+    sample = text.replace("\r", "\n")
+    sample = sample[max(0, len(sample) - 300):]
+    return frames, last_time, f"rc={proc.returncode} sample={sample!r}"
+
+
 def count_video_frames(ffmpeg: str, path: Path) -> tuple[int, float]:
     global FRAME_COUNT_DEBUG
-    """统计视频流帧数与末帧结束时刻（只解复用、不解码，通常几十毫秒）。
+    """统计视频流帧数与末帧结束时刻（通常几十毫秒，缓存后零成本）。
 
     返回 ``(帧数, 时长)``。容器时长可能因音轨比视频长而偏大，
     按帧数算出的时长才是视频流真实长度。
@@ -180,43 +223,17 @@ def count_video_frames(ffmpeg: str, path: Path) -> tuple[int, float]:
     if key in _FRAME_COUNT_CACHE:
         return _FRAME_COUNT_CACHE[key]
 
-    frames, last_time = 0, 0.0
+    debug_parts = []
     try:
-        # 用 -progress 的 key=value 机器可读输出统计。注意 -progress 在
-        # 6.x 里是「输出选项」，必须放在输出参数前面（7+ 才同时接受全局
-        # 位置）；ffmpeg 9 起 stderr 经典 stats 行不可靠，且 `-c copy` 到
-        # null 时其 time= 还会把封装器给视频流的起点偏移算进去。
-        proc = subprocess.run(
-            [ffmpeg, "-hide_banner", "-nostdin", "-nostats",
-             "-i", str(path), "-map", "0:v:0", "-c", "copy",
-             "-progress", "pipe:1", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=300, errors="replace",
-        )
-        text = f"{proc.stdout or ''}\n{proc.stderr or ''}"
-        FRAME_COUNT_DEBUG = (f"rc={proc.returncode} "
-                             f"stdout[{len(proc.stdout or '')}]={text[:400]!r}")
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("frame="):
-                mf = re.search(r"frame=\s*(\d+)", line)
-                if mf:
-                    frames = max(frames, int(mf.group(1)))
-            mu = re.search(r"^out_time_us=(\d+)", line)
-            if mu:
-                last_time = max(last_time, int(mu.group(1)) / 1e6)
-                continue
-            if "time=" in line and not line.startswith("out_time"):
-                mt = re.search(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", line)
-                if mt:
-                    h, mi, s = mt.groups()
-                    last_time = max(last_time,
-                                    int(h) * 3600 + int(mi) * 60 + float(s))
+        # 主路径：只解复用不解码，最快
+        frames, last_time, dbg = _run_demux(ffmpeg, path, decode=False)
+        debug_parts.append(f"copy:{dbg}")
     except Exception as exc:
         frames, last_time = 0, 0.0
-        FRAME_COUNT_DEBUG = f"demux raised: {exc!r}"
+        debug_parts.append(f"copy raised: {exc!r}")
 
     if frames == 0:
-        # 兜底：ffprobe 逐帧计数（要解码，慢一些但跨版本行为一致）。
+        # 兜底一：ffprobe 逐帧计数（要解码，慢一些但行为一致）
         ffprobe = find_ffprobe()
         if ffprobe:
             try:
@@ -226,11 +243,22 @@ def count_video_frames(ffmpeg: str, path: Path) -> tuple[int, float]:
                      "-of", "default=nw=1:nk=1", str(path)],
                     capture_output=True, text=True, timeout=300,
                 ).stdout.strip()
+                debug_parts.append(f"ffprobe={raw!r}")
                 if raw.isdigit():
                     frames = int(raw)
-            except Exception:
-                pass
+            except Exception as exc:
+                debug_parts.append(f"ffprobe raised: {exc!r}")
 
+    if frames == 0:
+        # 兜底二：真实解码统计（frame= 计数器在解码路径上所有版本都有）
+        try:
+            frames, last_time2, dbg = _run_demux(ffmpeg, path, decode=True)
+            debug_parts.append(f"decode:{dbg}")
+            last_time = max(last_time, last_time2)
+        except Exception as exc:
+            debug_parts.append(f"decode raised: {exc!r}")
+
+    FRAME_COUNT_DEBUG = " | ".join(debug_parts)
     result = (frames, last_time)
     _FRAME_COUNT_CACHE[key] = result
     return result
