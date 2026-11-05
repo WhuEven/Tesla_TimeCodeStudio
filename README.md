@@ -26,7 +26,7 @@
 - **拼接与截取**：勾选「拼接」列即可任选其中几段参与导出（不必是连续片段，
   时间码在各段内仍精确锚定）；「显示视角」筛选导出范围；列表顺序即拼接顺序，
   可用 ↑/↓ 手动调整，或一键恢复按时间排序；每个片段可设入点/出点
-  （双击列表输入，或用"截取片段"对话框预览调滑块）
+  （双击列表输入，或用「截取片段」对话框：预览 / 播放 / 单时间轴上拖入出点）
 - **帧精确拼接**：入出点自动吸附到帧边界，拼接点不丢帧、不重复帧
   （音频比视频提前 2ms 收尾，避免 concat 按较长的音轨复制视频末帧；
   截取窗口也按视频流真实帧数计算，不受容器时长里音轨余量影响）
@@ -37,7 +37,7 @@
 
 ## 下载（不想装 Python 的话）
 
-到 [**Releases**](https://github.com/WhuEven/Tesla_TimeCodeStudio/releases) 下载
+到 [**Releases**](https://github.com/WhuEven/Tesla_TimeCodeStudio/releases/latest) 下载
 `TimeCodeStudio-<版本>-macOS-arm64.zip`，解压后把 **`TimeCode Studio.app`**
 拖进「应用程序」即可。包里已内嵌 Python、PySide6 与 ffmpeg，**不需要装任何环境**。
 
