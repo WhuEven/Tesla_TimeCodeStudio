@@ -6,10 +6,10 @@ import os
 import shutil
 import subprocess
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QSettings, Signal
+from PySide6.QtCore import Qt, QThread, QSettings, QTimer, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap, QIntValidator
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
@@ -29,6 +29,7 @@ from .model import (
     parse_hms,
 )
 from .naming import TESLA_VIEW_ORDER, VIEW_LABELS, fill_missing_times, sort_for_timeline
+from .timeline import TimelineBar
 
 APP_DIR = Path(__file__).resolve().parent.parent
 FONT_DIR = APP_DIR / "assets" / "fonts"
@@ -102,70 +103,253 @@ class ExportWorker(QThread):
 # ------------------------------------------------------------------ 裁剪对话框
 
 class TrimDialog(QDialog):
-    """单片段截取：预览帧 + 入/出点滑块。"""
+    """单片段截取：一条时间轴同时呈现入点 / 出点 / 预览点。
+
+    三个标记共用一个坐标系：拖动入点只会停在出点前，拖动出点只会停在入点后，
+    「用预览点作入点」不会改动出点（反之亦然）。预览点在截取范围外时
+    预览标记变橙色并给出提示。
+    """
+
+    FRAME_W = 720
 
     def __init__(self, clip: Clip, ffmpeg: str, parent=None):
         super().__init__(parent)
         self.clip = clip
         self.ffmpeg = ffmpeg
-        self.tmp = Path(tempfile.mkdtemp(prefix="tcs_preview_"))
-        self.setWindowTitle(f"截取 — {clip.path.name}")
-        self.resize(640, 520)
+        self.tmp = Path(tempfile.mkdtemp(prefix="tcs_trim_"))
+        self._pm: QPixmap | None = None
+        self._shown_key: int | None = None
 
+        dur = max(0.05, clip.duration)
+        fps = clip.info.fps or 30.0
+        in0 = max(0.0, min(clip.in_point, dur))
+        out0 = clip.out_point if clip.out_point > 0 else dur
+        out0 = min(out0, dur)
+        if out0 - in0 < 1.0 / fps:
+            out0 = min(dur, in0 + 1.0 / fps)
+
+        self.setWindowTitle(f"截取 — {clip.path.name}")
+        self.resize(800, 680)
+
+        # ---- 预览帧 ----
         self.lbl_frame = QLabel("正在抽帧…")
         self.lbl_frame.setAlignment(Qt.AlignCenter)
-        self.lbl_frame.setMinimumSize(560, 300)
-        self.lbl_frame.setStyleSheet("background:#111;color:#aaa;")
+        self.lbl_frame.setMinimumSize(720, 320)
+        self.lbl_frame.setStyleSheet(
+            "background:#0d0f12;color:#9aa4b2;border-radius:4px;")
 
-        dur = clip.duration
-        self.sld_pos = QSlider(Qt.Horizontal); self.sld_pos.setRange(0, int(dur * 10))
-        self.sld_in = QSlider(Qt.Horizontal); self.sld_in.setRange(0, int(dur * 10))
-        self.sld_out = QSlider(Qt.Horizontal); self.sld_out.setRange(0, int(dur * 10))
-        self.sld_in.setValue(int(clip.in_point * 10))
-        self.sld_out.setValue(int((clip.out_point or dur) * 10))
-        self.sld_pos.setValue(int((clip.in_point + 1) * 10))
+        # ---- 时间轴 ----
+        self.bar = TimelineBar(dur, fps, self)
+        self.bar.set_range(in0, out0, emit=False)
+        # 再次打开时预览点从入点开始
+        self.bar.set_cursor(in0, emit=False)
 
-        self.lbl_info = QLabel()
-        b1 = QPushButton("把当前位置设为入点")
-        b2 = QPushButton("把当前位置设为出点")
-        b1.clicked.connect(lambda: self.sld_in.setValue(self.sld_pos.value()))
-        b2.clicked.connect(lambda: self.sld_out.setValue(self.sld_pos.value()))
-        for s in (self.sld_pos, self.sld_in, self.sld_out):
-            s.valueChanged.connect(self._sync)
+        self._seek_timer = QTimer(self)
+        self._seek_timer.setSingleShot(True)
+        self._seek_timer.setInterval(110)
+        self._seek_timer.timeout.connect(self._render_frame)
 
-        ok = QPushButton("确定"); ok.clicked.connect(self.accept)
+        # ---- 时间数值（可直接输入） ----
+        self.edt_in = QLineEdit(); self.edt_in.setFixedWidth(112)
+        self.edt_out = QLineEdit(); self.edt_out.setFixedWidth(112)
+        for e in (self.edt_in, self.edt_out):
+            e.setAlignment(Qt.AlignCenter)
+            e.setToolTip("格式 h:mm:ss.mmm，回车生效")
+            e.editingFinished.connect(self._apply_time_edits)
+        self.lbl_cursor = QLabel("—")
+        self.lbl_cursor.setStyleSheet("font-weight:600;")
+        self.lbl_dur = QLabel("—")
+
+        trow = QHBoxLayout()
+        trow.setSpacing(6)
+        trow.addWidget(QLabel("入点")); trow.addWidget(self.edt_in)
+        trow.addSpacing(8)
+        trow.addWidget(QLabel("出点")); trow.addWidget(self.edt_out)
+        trow.addSpacing(8)
+        trow.addWidget(QLabel("预览点")); trow.addWidget(self.lbl_cursor)
+        trow.addStretch(1)
+        trow.addWidget(QLabel("截取时长")); trow.addWidget(self.lbl_dur)
+
+        # ---- 导航 ----
+        nav = QHBoxLayout()
+        nav.setSpacing(6)
+        for text, unit, sign, tip in (
+            ("◀ 1 秒", "sec", -1, "预览点后退 1 秒（Shift+←）"),
+            ("◀ 1 帧", "frame", -1, "预览点后退 1 帧（←）"),
+            ("1 帧 ▶", "frame", +1, "预览点前进 1 帧（→）"),
+            ("1 秒 ▶", "sec", +1, "预览点前进 1 秒（Shift+→）"),
+        ):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, u=unit, s=sign: self._nudge(u, s))
+            nav.addWidget(b)
+        b_full = QPushButton("整段")
+        b_full.setToolTip("入点回到开头、出点回到片尾（预览点不动）")
+        b_full.clicked.connect(self._restore_full)
+        nav.addWidget(b_full)
+        nav.addStretch(1)
+        keyboard_hint = QLabel("← → 逐帧 · Shift+← → 逐秒 · I / O 设入出点")
+        keyboard_hint.setStyleSheet("color:#8b93a1;font-size:11px;")
+        nav.addWidget(keyboard_hint)
+
+        # ---- 状态 ----
+        self.lbl_status = QLabel()
+        self.lbl_status.setWordWrap(True)
+        self.lbl_hint = QLabel("")
+        self.lbl_hint.setWordWrap(True)
+        self.lbl_hint.setStyleSheet("color:#8b93a1;font-size:11px;")
+
+        # ---- 操作按钮 ----
+        b_in = QPushButton("⟦ 用预览点作入点")
+        b_out = QPushButton("用预览点作出点 ⟧")
+        b_in.clicked.connect(self._set_in_from_cursor)
+        b_out.clicked.connect(self._set_out_from_cursor)
+        ok = QPushButton("确定"); ok.setDefault(True); ok.clicked.connect(self.accept)
         ca = QPushButton("取消"); ca.clicked.connect(self.reject)
+        arow = QHBoxLayout()
+        arow.setSpacing(8)
+        arow.addWidget(b_in); arow.addWidget(b_out)
+        arow.addStretch(1)
+        arow.addWidget(ca); arow.addWidget(ok)
 
-        grid = QHBoxLayout()
-        grid.addWidget(b1); grid.addWidget(b2); grid.addStretch(1); grid.addWidget(ok); grid.addWidget(ca)
         lay = QVBoxLayout(self)
-        lay.addWidget(self.lbl_frame)
-        for label, s in (("预览位置", self.sld_pos), ("入点", self.sld_in), ("出点", self.sld_out)):
-            row = QHBoxLayout()
-            row.addWidget(QLabel(label)); row.addWidget(s)
-            lay.addLayout(row)
-        lay.addWidget(self.lbl_info)
-        lay.addLayout(grid)
-        self._sync()
-        self.sld_pos.setValue(int(dur * 10 * 0.3))
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(8)
+        lay.addWidget(self.lbl_frame, 1)
+        lay.addWidget(self.bar)
+        lay.addLayout(trow)
+        lay.addLayout(nav)
+        lay.addWidget(self.lbl_status)
+        lay.addWidget(self.lbl_hint)
+        lay.addLayout(arow)
 
+        self.bar.cursorMoved.connect(self._on_cursor)
+        self.bar.rangeChanged.connect(self._on_range)
+        self._sync()
+        self._request_frame()
+
+    # ---------------- 交互 ----------------
+    def _nudge(self, unit: str, sign: int):
+        step = self.bar.frame_step() if unit == "frame" else 1.0
+        self.bar.nudge_cursor(step * sign)
+
+    def _restore_full(self):
+        self.bar.set_range(0.0, self.bar.duration())
+        self.lbl_hint.setText("已恢复为整段（预览点保持不变）")
+
+    def _set_in_from_cursor(self):
+        at = self.bar.cursor()
+        clamped = self.bar.set_in_from_cursor()
+        if clamped:
+            self.lbl_hint.setText(
+                f"预览点在出点之后：入点已限制为 {fmt_hms(self.bar.in_point(), True)}，出点未改动")
+        else:
+            self.lbl_hint.setText(f"入点 = {fmt_hms(at, True)}（出点未改动）")
+
+    def _set_out_from_cursor(self):
+        at = self.bar.cursor()
+        clamped = self.bar.set_out_from_cursor()
+        if clamped:
+            self.lbl_hint.setText(
+                f"预览点在入点之前：出点已限制为 {fmt_hms(self.bar.out_point(), True)}，入点未改动")
+        else:
+            self.lbl_hint.setText(f"出点 = {fmt_hms(at, True)}（入点未改动）")
+
+    def _apply_time_edits(self):
+        """手动输入入 / 出点时间。"""
+        for edt, setter in ((self.edt_in, self.bar.set_in), (self.edt_out, self.bar.set_out)):
+            v = parse_hms(edt.text())
+            if v is None:
+                continue
+            setter(v)
+        self._sync()
+
+    def _on_cursor(self, _t: float):
+        self._sync()
+        self._request_frame()
+
+    def _on_range(self, *_args):
+        self._sync()
+
+    # ---------------- 显示 ----------------
     def _sync(self):
-        self.sld_in.setMaximum(max(0, self.sld_out.value() - 1))
-        self.sld_out.setMinimum(self.sld_in.value() + 1)
-        p = self.sld_pos.value() / 10
-        i, o = self.sld_in.value() / 10, self.sld_out.value() / 10
-        self.lbl_info.setText(
-            f"入点 {fmt_hms(i, True)}   出点 {fmt_hms(o, True)}   截取时长 {o - i:.2f}s")
-        out = self.tmp / "f.png"
-        if extract_frame(self.ffmpeg, self.clip.path, p, out, width=560):
-            pm = QPixmap(str(out))
-            if not pm.isNull():
-                self.lbl_frame.setPixmap(
-                    pm.scaled(self.lbl_frame.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        bar = self.bar
+        i, o, c = bar.in_point(), bar.out_point(), bar.cursor()
+        if not self.edt_in.hasFocus():
+            self.edt_in.setText(fmt_hms(i, True))
+        if not self.edt_out.hasFocus():
+            self.edt_out.setText(fmt_hms(o, True))
+        self.lbl_cursor.setText(fmt_hms(c, True))
+        self.lbl_dur.setText(f"{max(0.0, o - i):.2f}s")
+
+        inside = bar.cursor_inside()
+        start = self.clip.start_dt
+        msg = "预览点在截取范围内" if inside else "预览点在截取范围外 · 该位置不会被导出"
+        if start is not None:
+            tc = (start + timedelta(seconds=c)).strftime("%H:%M:%S.%f")[:-3]
+            msg += f"　时间码 {tc}"
+        self.lbl_status.setText(msg)
+        self.lbl_status.setStyleSheet(
+            "color:#2f7cf6;font-weight:600;" if inside else "color:#e07b39;font-weight:600;")
+
+    def _request_frame(self):
+        self._seek_timer.start()
+
+    def _render_frame(self):
+        at = self.bar.cursor()
+        fps = self.clip.info.fps or 30.0
+        key = int(round(at * fps))
+        if key == self._shown_key:
+            return
+        out = self.tmp / f"f{key:08d}.png"
+        if not out.exists() and not extract_frame(
+                self.ffmpeg, self.clip.path, at, out, width=self.FRAME_W):
+            self.lbl_frame.setText("该位置无法抽帧")
+            return
+        pm = QPixmap(str(out))
+        if pm.isNull():
+            self.lbl_frame.setText("该位置无法抽帧")
+            return
+        self._shown_key = key
+        self._pm = pm
+        self._apply_pixmap()
+
+    def _apply_pixmap(self):
+        if self._pm is None:
+            return
+        self.lbl_frame.setPixmap(self._pm.scaled(
+            self.lbl_frame.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_pixmap()
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        step = self.bar.frame_step()
+        big = bool(event.modifiers() & Qt.ShiftModifier)
+        if key == Qt.Key_Left:
+            self.bar.nudge_cursor(-1.0 if big else -step); return
+        if key == Qt.Key_Right:
+            self.bar.nudge_cursor(1.0 if big else step); return
+        if key == Qt.Key_I:
+            self._set_in_from_cursor(); return
+        if key == Qt.Key_O:
+            self._set_out_from_cursor(); return
+        if key == Qt.Key_Home:
+            self.bar.set_cursor(0.0); return
+        if key == Qt.Key_End:
+            self.bar.set_cursor(self.bar.duration()); return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        self._seek_timer.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        super().closeEvent(event)
 
     def apply(self):
-        self.clip.in_point = self.sld_in.value() / 10
-        self.clip.out_point = self.sld_out.value() / 10
+        self.clip.in_point = self.bar.in_point()
+        self.clip.out_point = self.bar.out_point()
 
 
 # ------------------------------------------------------------------ 主窗口
