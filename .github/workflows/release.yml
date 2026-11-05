@@ -65,7 +65,7 @@ jobs:
       - name: 记录校验值与内容清单
         run: |
           shasum -a 256 dist/*.zip | tee dist/SHA256SUMS.txt
-          du -sh "dist/Time Code Studio.app" dist/*.zip
+          du -sh dist/*.app dist/*.zip
 
       - uses: actions/upload-artifact@v4
         with:
