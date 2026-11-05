@@ -1,0 +1,69 @@
+name: Bug 报告
+description: 导出的视频有问题、界面异常、启动失败等
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请尽量附上**能复现的最小信息**：素材的命名方式、你设置的入出点、
+        导出的规格。如果涉及安全漏洞，请改用
+        [私密报告](https://github.com/WhuEven/Tesla_TimeCodeStudio/security/advisories/new)，
+        不要发在公开 Issue。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象
+      description: 发生了什么，和你期望的有什么不同
+      placeholder: 例如：两段视频拼接后，拼接点有一帧画面重复，声音也顿了一下
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 导入 3 个片段（文件名 2026-10-29_19-03-40-front.mp4 …）
+        2. 第二段截取 10s ~ 30s
+        3. 导出 1280×720 / libx264 / 4000 kbps
+        4. 在 30s 处逐帧检查
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: Releases 里的标签，或 commit 短哈希；源码运行请注明
+      placeholder: v1.0.0 / 4a3d1e0 / 从源码运行
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 系统
+      options:
+        - macOS（Apple Silicon）
+        - macOS（Intel）
+        - Windows
+        - Linux
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: |
+        macOS 上启动日志在 `TimeCode Studio.app/Contents/Resources/app/launch.log`
+        （源码运行为项目根目录的 `launch.log`）；导出失败时导出窗口的日志框也有内容。
+      render: text
+
+  - type: textarea
+    id: media
+    attributes:
+      label: 素材信息（可选）
+      description: 命名格式、分辨率、帧率、时长；能提供一小段样片最好（注意隐去隐私内容）

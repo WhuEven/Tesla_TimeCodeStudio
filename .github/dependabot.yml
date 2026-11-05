@@ -1,0 +1,39 @@
+version: 2
+
+updates:
+  # Python 依赖（PySide6 / fontTools / imageio-ffmpeg）
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    labels: ["dependencies"]
+    commit-message:
+      prefix: "deps"
+    groups:
+      python-deps:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      # 6.11+ 要求 Python >= 3.10，而作者本机是 3.9；跨大版本手动评估
+      - dependency-name: "PySide6"
+        update-types: ["version-update:semver-major"]
+
+  # Actions 版本（checkout / setup-python / upload-artifact）
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "ci"]
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]

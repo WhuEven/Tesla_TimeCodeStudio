@@ -1,0 +1,46 @@
+name: 功能建议
+description: 想要新的能力，或现有流程可以更顺手
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你遇到的场景
+      description: 先说场景和痛点，再说方案 —— 这样更容易找到更合适的做法
+      placeholder: 例如：我一次要处理一周的记录，每段 60 秒，想按 10 分钟自动切片打包
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你希望的方案
+      placeholder: 例如：导出设置里加一个「按固定时长切片」，自动命名 part01.mp4 …
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 现在怎么绕过（可选）
+      description: 例如用别的软件、脚本、手工分段
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 优先级（对你而言）
+      options:
+        - 影响我现在的使用，比较急
+        - 长期会更顺手
+        - 只是想法
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: roadmap
+    attributes:
+      label: 是否属于已知的待做项
+      options:
+        - label: HEVC（H.265）编码
+        - label: 多视角宫格拼版（2×2 / 3×2）
+        - label: 逐帧精确的时间码显示（含毫秒）
+        - label: Windows 打包分发

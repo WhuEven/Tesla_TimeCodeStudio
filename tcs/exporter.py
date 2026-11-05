@@ -274,6 +274,8 @@ class ExportRunner:
             elif line:
                 self.on_log(line)
         rc = self.proc.wait()
+        if self.proc.stdout is not None:
+            self.proc.stdout.close()      # 及时释放管道，避免 ResourceWarning
         if self.cancelled:
             raise InterruptedError("已取消")
         if rc != 0 or not plan.output.exists():

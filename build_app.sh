@@ -52,8 +52,20 @@ PY_BASE_PREFIX="$("$PY" -c 'import sys; print(sys.base_prefix)' 2>/dev/null || t
 PY_VERSION="$("$PY" -c 'import platform; print(platform.python_version())' 2>/dev/null || echo 3.9)"
 PY_VER_SHORT="$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo 3.9)"
 PY_SITE="$("$PY" -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null || true)"
-PY_DYLIB="$PY_BASE_PREFIX/Python3"
-PY_HEADERS="$PY_BASE_PREFIX/Headers"
+# Python 动态库与头文件的位置随发行方式不同：
+#   Apple CLT : <base>/Python3 + <base>/Headers            （本机即此形态）
+#   python.org: <base>/Python + <base>/include/pythonX.Y   （setup-python / 官方安装包）
+#   Homebrew  : <base>/Python + <base>/include/pythonX.Y
+# 三者都试一遍，脚本才能在 GitHub Actions 的 runner 上直接构建。
+PY_DYLIB=""
+for cand in "$PY_BASE_PREFIX/Python3" "$PY_BASE_PREFIX/Python" \
+            "$PY_BASE_PREFIX/lib/libpython$PY_VER_SHORT.dylib"; do
+    if [ -f "$cand" ]; then PY_DYLIB="$cand"; break; fi
+done
+PY_HEADERS=""
+for cand in "$PY_BASE_PREFIX/Headers" "$PY_BASE_PREFIX/include/python$PY_VER_SHORT"; do
+    if [ -d "$cand" ]; then PY_HEADERS="$cand"; break; fi
+done
 
 rm -rf "$APP"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$CONTENTS/Frameworks"
@@ -245,13 +257,14 @@ HOSTC
     CLANG_ARGS=""
     for a in $ARCHS; do CLANG_ARGS="$CLANG_ARGS -arch $a"; done
 
+    # 先把包内副本的 install_name 改成相对路径，再链接它：
+    # 这样无论原 dylib 的 ID 是 Python3.framework/... 还是 Python.framework/...，
+    # 可执行文件的依赖都会指向 @executable_path/../Frameworks/Python3。
+    install_name_tool -id "@executable_path/../Frameworks/Python3" \
+        "$CONTENTS/Frameworks/Python3" 2>/dev/null || true
+
     if clang -O2 $CLANG_ARGS -I"$PY_HEADERS" "$STUB_SRC" \
             "$CONTENTS/Frameworks/Python3" -o "$CONTENTS/MacOS/TimeCodeStudio" 2>/dev/null; then
-        install_name_tool -change "@rpath/Python3.framework/Versions/${PY_VERSION%.*}/Python3" \
-            "@executable_path/../Frameworks/Python3" \
-            "$CONTENTS/MacOS/TimeCodeStudio" 2>/dev/null || true
-        install_name_tool -id "@executable_path/../Frameworks/Python3" \
-            "$CONTENTS/Frameworks/Python3" 2>/dev/null || true
         codesign -s - --force "$CONTENTS/Frameworks/Python3" >/dev/null 2>&1 || true
         codesign -s - --force "$CONTENTS/MacOS/TimeCodeStudio" >/dev/null 2>&1 || true
         EXEC_NAME="TimeCodeStudio"

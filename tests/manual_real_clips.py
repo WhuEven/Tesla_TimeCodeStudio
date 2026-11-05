@@ -1,4 +1,10 @@
-"""CLI 端到端冒烟测试：3 段特斯拉片段 → 截取 + 拼接 + 时间码 → 导出。"""
+"""手动冒烟：拿真实的 TeslaCam 素材跑一遍完整导出（不在 CI 里跑）。
+
+自动化测试用 ``tests/fixtures.py`` 合成的短片（见 ``python -m unittest
+discover -s tests -t .``）；本脚本需要挂载真实 U 盘，用来看成片效果：
+
+    .venv/bin/python tests/manual_real_clips.py
+"""
 
 import sys
 import time

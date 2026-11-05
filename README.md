@@ -1,5 +1,11 @@
 # TimeCode Studio
 
+[![CI](https://github.com/WhuEven/Tesla_TimeCodeStudio/actions/workflows/ci.yml/badge.svg)](https://github.com/WhuEven/Tesla_TimeCodeStudio/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/WhuEven/Tesla_TimeCodeStudio/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/WhuEven/Tesla_TimeCodeStudio/security/code-scanning)
+[![Release](https://img.shields.io/github/v/release/WhuEven/Tesla_TimeCodeStudio)](https://github.com/WhuEven/Tesla_TimeCodeStudio/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-macOS%20arm64-lightgrey)](https://github.com/WhuEven/Tesla_TimeCodeStudio/releases/latest)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](requirements.txt)
+
 行车记录仪 / 监控视频的**时间码拼接工具**。针对 TeslaCam（特斯拉行车记录仪）
 设计，同时兼容其他按时间命名的监控视频。
 
@@ -141,5 +147,25 @@ tcs/playback.py       预览播放器（ffmpeg 解码 → 逐帧画面）
 tcs/ui_main.py        PySide6 界面
 build_app.sh          生成 .app（--dist 生成自包含分发包）
 release.sh            构建 + 打 tag +（可选）创建 GitHub Release
-tests/smoke_cli.py    命令行端到端冒烟测试
+tests/                unittest 测试套件（自带素材合成，CI 里跑）
+.github/workflows/    CI（多平台测试）与 Release（打 tag 自动出包）
 ```
+
+## 测试
+
+```bash
+python -m unittest discover -s tests -t . -v      # 约 2 秒
+```
+
+103 个用例，素材全部用 ffmpeg 的 lavfi 源现场合成（不依赖真实录像），
+覆盖文件名解析、时长/体积计算、ASS 时间码、媒体探测，以及**真实编码的
+端到端导出** —— 其中「音轨比视频长时拼接点不重复末帧」是回归重点。
+界面部分用 `QT_QPA_PLATFORM=offscreen` 跑，无显示器也能过。
+
+需要看真实成片效果时用手动脚本（要先挂载 U 盘）：
+
+```bash
+python tests/manual_real_clips.py
+```
+
+详细文档见 [Wiki](https://github.com/WhuEven/Tesla_TimeCodeStudio/wiki)。
