@@ -26,7 +26,7 @@ jobs:
     # 分发包依赖 arm64 的 Python 与 ffmpeg，必须跑在 Apple Silicon runner 上
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 确认 runner 架构
         run: |
@@ -34,7 +34,7 @@ jobs:
           test "$(uname -m)" = "arm64" || {
             echo "::error::当前 runner 不是 arm64，产物会与文件名不符"; exit 1; }
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -67,7 +67,7 @@ jobs:
           shasum -a 256 dist/*.zip | tee dist/SHA256SUMS.txt
           du -sh dist/*.app dist/*.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: TimeCodeStudio-${{ env.TCS_VERSION }}-macOS-arm64
           path: |
