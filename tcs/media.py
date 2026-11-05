@@ -161,9 +161,12 @@ def _probe_ffmpeg(ffmpeg: str, path: Path) -> MediaInfo:
 
 
 _FRAME_COUNT_CACHE: dict[tuple[str, int, int], tuple[int, float]] = {}
+# 最近一次统计的调试信息（命令、返回码与输出采样），测试失败时帮助定位
+FRAME_COUNT_DEBUG = ""
 
 
 def count_video_frames(ffmpeg: str, path: Path) -> tuple[int, float]:
+    global FRAME_COUNT_DEBUG
     """统计视频流帧数与末帧结束时刻（只解复用、不解码，通常几十毫秒）。
 
     返回 ``(帧数, 时长)``。容器时长可能因音轨比视频长而偏大，
@@ -190,6 +193,8 @@ def count_video_frames(ffmpeg: str, path: Path) -> tuple[int, float]:
             capture_output=True, text=True, timeout=300, errors="replace",
         )
         text = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+        FRAME_COUNT_DEBUG = (f"rc={proc.returncode} "
+                             f"stdout[{len(proc.stdout or '')}]={text[:400]!r}")
         for line in text.splitlines():
             line = line.strip()
             if line.startswith("frame="):
@@ -206,8 +211,9 @@ def count_video_frames(ffmpeg: str, path: Path) -> tuple[int, float]:
                     h, mi, s = mt.groups()
                     last_time = max(last_time,
                                     int(h) * 3600 + int(mi) * 60 + float(s))
-    except Exception:
+    except Exception as exc:
         frames, last_time = 0, 0.0
+        FRAME_COUNT_DEBUG = f"demux raised: {exc!r}"
 
     if frames == 0:
         # 兜底：ffprobe 逐帧计数（要解码，慢一些但跨版本行为一致）。

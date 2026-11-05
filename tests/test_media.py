@@ -44,7 +44,11 @@ class TestProbe(unittest.TestCase):
         self.assertAlmostEqual(self.info.fps, 24.0, places=2)
 
     def test_frame_count(self):
-        self.assertEqual(self.info.frame_count, 72)   # 3.0s × 24fps
+        from tcs import media
+        self.assertEqual(
+            self.info.frame_count, 72,
+            f"3.0s × 24fps；调试：ffmpeg={find_ffmpeg()} ffprobe={find_ffprobe()} "
+            f"debug={media.FRAME_COUNT_DEBUG!r}")   # 3.0s × 24fps
 
     def test_video_duration_from_frames(self):
         self.assertAlmostEqual(self.info.video_duration, 3.0, places=2)
