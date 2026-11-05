@@ -29,6 +29,7 @@ from .model import (
     parse_hms,
 )
 from .naming import TESLA_VIEW_ORDER, VIEW_LABELS, fill_missing_times, sort_for_timeline
+from .playback import FramePlayer
 from .timeline import TimelineBar
 
 APP_DIR = Path(__file__).resolve().parent.parent
@@ -119,6 +120,7 @@ class TrimDialog(QDialog):
         self.tmp = Path(tempfile.mkdtemp(prefix="tcs_trim_"))
         self._pm: QPixmap | None = None
         self._shown_key: int | None = None
+        self._play_on = False
 
         dur = max(0.05, clip.duration)
         fps = clip.info.fps or 30.0
@@ -129,14 +131,24 @@ class TrimDialog(QDialog):
             out0 = min(dur, in0 + 1.0 / fps)
 
         self.setWindowTitle(f"截取 — {clip.path.name}")
-        self.resize(800, 680)
+        self.resize(800, 720)
 
-        # ---- 预览帧 ----
+        # ---- 预览区：静态帧与播放帧共用同一个 label ----
         self.lbl_frame = QLabel("正在抽帧…")
         self.lbl_frame.setAlignment(Qt.AlignCenter)
-        self.lbl_frame.setMinimumSize(720, 320)
+        self.lbl_frame.setMinimumSize(720, 340)
         self.lbl_frame.setStyleSheet(
             "background:#0d0f12;color:#9aa4b2;border-radius:4px;")
+
+        # ---- 播放器（ffmpeg 解码 → 逐帧送界面） ----
+        self.player = FramePlayer(self)
+        self.player.frameReady.connect(self._on_player_frame)
+        self.player.positionChanged.connect(self._on_player_pos)
+        self.player.finished.connect(self._on_player_finished)
+        self._play_restart = QTimer(self)
+        self._play_restart.setSingleShot(True)
+        self._play_restart.setInterval(180)
+        self._play_restart.timeout.connect(lambda: self._spawn_playback())
 
         # ---- 时间轴 ----
         self.bar = TimelineBar(dur, fps, self)
@@ -170,9 +182,17 @@ class TrimDialog(QDialog):
         trow.addStretch(1)
         trow.addWidget(QLabel("截取时长")); trow.addWidget(self.lbl_dur)
 
-        # ---- 导航 ----
+        # ---- 导航 / 播放 ----
         nav = QHBoxLayout()
         nav.setSpacing(6)
+        self.btn_play = QPushButton("▶ 从预览点播放")
+        self.btn_play.setToolTip(
+            "从预览点开始播放，预览点跟随画面移动，到出点自动暂停（空格）；预览播放为静音")
+        self.btn_play.clicked.connect(self._toggle_play)
+        if not self.ffmpeg:
+            self.btn_play.setEnabled(False)
+        nav.addWidget(self.btn_play)
+        nav.addSpacing(4)
         for text, unit, sign, tip in (
             ("◀ 1 秒", "sec", -1, "预览点后退 1 秒（Shift+←）"),
             ("◀ 1 帧", "frame", -1, "预览点后退 1 帧（←）"),
@@ -188,9 +208,9 @@ class TrimDialog(QDialog):
         b_full.clicked.connect(self._restore_full)
         nav.addWidget(b_full)
         nav.addStretch(1)
-        keyboard_hint = QLabel("← → 逐帧 · Shift+← → 逐秒 · I / O 设入出点")
-        keyboard_hint.setStyleSheet("color:#8b93a1;font-size:11px;")
-        nav.addWidget(keyboard_hint)
+
+        self.lbl_kbd = QLabel("空格 播放/暂停 · ← → 逐帧 · Shift+← → 逐秒 · I / O 设入出点")
+        self.lbl_kbd.setStyleSheet("color:#8b93a1;font-size:11px;")
 
         # ---- 状态 ----
         self.lbl_status = QLabel()
@@ -204,8 +224,12 @@ class TrimDialog(QDialog):
         b_out = QPushButton("用预览点作出点 ⟧")
         b_in.clicked.connect(self._set_in_from_cursor)
         b_out.clicked.connect(self._set_out_from_cursor)
-        ok = QPushButton("确定"); ok.setDefault(True); ok.clicked.connect(self.accept)
+        ok = QPushButton("确定"); ok.clicked.connect(self.accept)
         ca = QPushButton("取消"); ca.clicked.connect(self.reject)
+        # 取消自动默认按钮：否则空格会触发「确定」，而空格要用来播放/暂停
+        for b in (b_in, b_out, ok, ca):
+            b.setAutoDefault(False)
+            b.setDefault(False)
         arow = QHBoxLayout()
         arow.setSpacing(8)
         arow.addWidget(b_in); arow.addWidget(b_out)
@@ -221,12 +245,83 @@ class TrimDialog(QDialog):
         lay.addLayout(nav)
         lay.addWidget(self.lbl_status)
         lay.addWidget(self.lbl_hint)
+        lay.addWidget(self.lbl_kbd)
         lay.addLayout(arow)
 
         self.bar.cursorMoved.connect(self._on_cursor)
         self.bar.rangeChanged.connect(self._on_range)
         self._sync()
         self._request_frame()
+        self.bar.setFocus()          # 空格/方向键直接作用于时间轴
+
+    # ---------------- 播放 ----------------
+    def _preview_size(self) -> tuple[int, int]:
+        """播放解码尺寸：宽度贴合预览区，保持源比例。"""
+        sw, sh = self.clip.info.width, self.clip.info.height
+        w = self.FRAME_W
+        if sw > 0:
+            w = min(self.FRAME_W, int(sw))
+        h = int(round(w * sh / sw)) if sw > 0 and sh > 0 else int(w * 9 / 16)
+        return max(2, w), max(2, h)
+
+    def _play_stop_at(self) -> float:
+        """起播到哪停：在截取范围内 → 停在出点；否则播到片尾。"""
+        at = self.bar.cursor()
+        out = self.bar.out_point()
+        if self.bar.cursor_inside() and out - at > 0.05:
+            return out
+        return self.bar.duration()
+
+    def _toggle_play(self):
+        if not self.ffmpeg:
+            self.lbl_hint.setText("未找到 ffmpeg，无法播放预览")
+            return
+        if self._play_on:
+            self._stop_playback()
+            return
+        # 已停在片尾再按播放 → 回到入点重播
+        if self.bar.cursor() >= self.bar.duration() - 1e-3:
+            self.bar.set_cursor(self.bar.in_point(), emit=False)
+            self._sync()
+        self._play_on = True
+        self.btn_play.setText("⏸ 暂停")
+        self._spawn_playback()
+
+    def _spawn_playback(self):
+        """从当前预览点起播（拖动时间轴时会重新拉起，旧帧由 generation 丢弃）。"""
+        if not self._play_on:
+            return
+        w, h = self._preview_size()
+        fps = self.clip.info.fps or 30.0
+        self.player.play(self.ffmpeg, self.clip.path, self.bar.cursor(), fps,
+                         self._play_stop_at(), w, h)
+
+    def _stop_playback(self):
+        self._play_on = False
+        self._play_restart.stop()
+        self.player.stop()
+        self.btn_play.setText("▶ 从预览点播放")
+        self._sync()
+
+    def _on_player_frame(self, gen: int, img):
+        if gen != self.player.generation():
+            return                       # 拖动后旧播放线程的残留帧
+        self._pm = QPixmap.fromImage(img)
+        self._shown_key = None
+        self._apply_pixmap()
+
+    def _on_player_pos(self, gen: int, t: float):
+        if gen != self.player.generation():
+            return
+        self.bar.set_cursor(t, emit=False)   # 画面由播放器给，无需抽帧
+        self._sync()
+
+    def _on_player_finished(self, gen: int):
+        if gen != self.player.generation() or not self._play_on:
+            return
+        self._play_on = False
+        self.btn_play.setText("▶ 从预览点播放")
+        self._sync()
 
     # ---------------- 交互 ----------------
     def _nudge(self, unit: str, sign: int):
@@ -264,7 +359,14 @@ class TrimDialog(QDialog):
             setter(v)
         self._sync()
 
-    def _on_cursor(self, _t: float):
+    def _on_cursor(self, t: float):
+        if self._play_on:
+            # 播放中拖时间轴 / 逐帧：先让旧位置的帧失效，去抖后从新位置重新起播
+            if not self._play_restart.isActive():
+                self.player.invalidate()
+            self._play_restart.start()
+            self._sync()
+            return
         self._sync()
         self._request_frame()
 
@@ -296,6 +398,8 @@ class TrimDialog(QDialog):
         self._seek_timer.start()
 
     def _render_frame(self):
+        if self._play_on:
+            return                       # 播放中不再抽帧，避免与播放画面互相覆盖
         at = self.bar.cursor()
         fps = self.clip.info.fps or 30.0
         key = int(round(at * fps))
@@ -340,10 +444,16 @@ class TrimDialog(QDialog):
             self.bar.set_cursor(0.0); return
         if key == Qt.Key_End:
             self.bar.set_cursor(self.bar.duration()); return
+        if key == Qt.Key_Space:
+            self._toggle_play(); return
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            self.accept(); return
         super().keyPressEvent(event)
 
     def closeEvent(self, event):
         self._seek_timer.stop()
+        self._play_restart.stop()
+        self.player.stop()
         shutil.rmtree(self.tmp, ignore_errors=True)
         super().closeEvent(event)
 
