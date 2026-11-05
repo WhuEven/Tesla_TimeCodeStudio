@@ -179,21 +179,29 @@ def count_video_frames(ffmpeg: str, path: Path) -> tuple[int, float]:
 
     frames, last_time = 0, 0.0
     try:
+        # -progress 的 key=value 输出是跨版本稳定的机器可读格式；
+        # ffmpeg 9 起 stderr 上的经典 stats 行不可靠（且 `-c copy` 到 null
+        # 时其 time= 还会把封装器给视频流的起点偏移算进去），所以以
+        # -progress 为主、stderr stats 为兜底。
         proc = subprocess.run(
-            [ffmpeg, "-hide_banner", "-nostdin", "-i", str(path),
+            [ffmpeg, "-hide_banner", "-nostdin", "-nostats",
+             "-progress", "pipe:1", "-i", str(path),
              "-map", "0:v:0", "-c", "copy", "-f", "null", "-"],
             capture_output=True, text=True, timeout=300, errors="replace",
         )
-        for line in proc.stderr.splitlines():
-            if "frame=" not in line:
-                continue
-            mf = re.search(r"frame=\s*(\d+)", line)
-            if mf:
-                frames = int(mf.group(1))
-            mt = re.search(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", line)
-            if mt:
-                h, mi, s = mt.groups()
-                last_time = int(h) * 3600 + int(mi) * 60 + float(s)
+        text = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("frame="):
+                mf = re.search(r"frame=\s*(\d+)", line)
+                if mf:
+                    frames = max(frames, int(mf.group(1)))
+            if "time=" in line:
+                mt = re.search(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", line)
+                if mt:
+                    h, mi, s = mt.groups()
+                    last_time = max(last_time,
+                                    int(h) * 3600 + int(mi) * 60 + float(s))
     except Exception:
         frames, last_time = 0, 0.0
 
