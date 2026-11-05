@@ -4,9 +4,14 @@
 # 双击 .command 文件必然由「终端」打开，无法避免黑窗口；
 # 本脚本把程序封装成标准 .app，双击后直接出现图形界面，不弹终端。
 #
-# 用法：  ./build_app.sh
-# 产物：  ./TimeCode Studio.app   （双击即可运行）
-# 排错：  运行日志在项目根目录 launch.log
+# 用法：
+#   ./build_app.sh           开发用：生成 "TimeCode Studio.app"，
+#                            运行时直接读仓库源码与 .venv（改代码即时生效）
+#   ./build_app.sh --dist    分发包：生成 dist/TimeCode Studio.app（自包含：
+#                            内嵌 Python、标准库、PySide6、ffmpeg 与源码），
+#                            并打包成 dist/TimeCodeStudio-<版本>-macOS-arm64.zip
+#                            可上传到 GitHub Releases 供他人下载
+# 排错：运行日志在应用包内的 launch.log（分发包在 Resources/app/launch.log）
 #
 # 关于主可执行文件（两个关键点）：
 #   1) 不能是 shell 脚本：纯脚本文本没有可识别架构，Apple Silicon 上会被
@@ -21,7 +26,21 @@ set -e
 cd "$(dirname "$0")" || exit 1
 ROOT="$(pwd)"
 
-APP="$ROOT/TimeCode Studio.app"
+DIST=0
+for arg in "$@"; do
+    case "$arg" in
+        --dist) DIST=1 ;;
+        -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+        *) echo "未知参数：$arg（可用：--dist）"; exit 1 ;;
+    esac
+done
+
+VERSION="${TCS_VERSION:-1.0.0}"
+if [ "$DIST" = "1" ]; then
+    APP="$ROOT/dist/TimeCode Studio.app"
+else
+    APP="$ROOT/TimeCode Studio.app"
+fi
 CONTENTS="$APP/Contents"
 
 # ---------------- 探测解释器 ----------------
@@ -31,6 +50,7 @@ PY="$ROOT/.venv/bin/python"
 
 PY_BASE_PREFIX="$("$PY" -c 'import sys; print(sys.base_prefix)' 2>/dev/null || true)"
 PY_VERSION="$("$PY" -c 'import platform; print(platform.python_version())' 2>/dev/null || echo 3.9)"
+PY_VER_SHORT="$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo 3.9)"
 PY_SITE="$("$PY" -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null || true)"
 PY_DYLIB="$PY_BASE_PREFIX/Python3"
 PY_HEADERS="$PY_BASE_PREFIX/Headers"
@@ -67,6 +87,7 @@ if [ -f "$PY_DYLIB" ] && [ -d "$PY_HEADERS" ] && command -v clang >/dev/null 2>&
 #define DEF_ROOT "$ROOT"
 #define DEF_HOME "$PY_BASE_PREFIX"
 #define DEF_SITE "$PY_SITE"
+#define DEF_PYVER "$PY_VER_SHORT"
 
 static int is_dir(const char *p) {
     struct stat st;
@@ -94,14 +115,30 @@ int main(int argc, char **argv) {
     char real[PATH_MAX];
     if (realpath(exe, real)) snprintf(exe, sizeof(exe), "%s", real);
 
-    /* 定位项目根：先信构建时写入的路径，再按包结构上溯（.app 被移动时兜底） */
+    /* Contents/Resources：分发包把运行时与源码都塞在这里 */
+    char res[PATH_MAX];
+    snprintf(res, sizeof(res), "%s", exe);
+    up(res);                              /* MacOS -> Contents */
+    up(res);                              /* Contents -> .app */
+    strncat(res, "/Resources", sizeof(res) - strlen(res) - 1);
+
+    /* 定位项目根：
+       1) 包内自带的源码（分发包，可脱离仓库任意移动）
+       2) 构建时写入的仓库路径（开发态）
+       3) 按包结构上溯（开发态下 .app 被移动时的兜底） */
     char root[PATH_MAX];
-    snprintf(root, sizeof(root), "%s", DEF_ROOT);
-    if (!has_main(root)) {
-        char cand[PATH_MAX];
-        snprintf(cand, sizeof(cand), "%s", exe);
-        for (int i = 0; i < 4; i++) up(cand);  /* MacOS -> Contents -> .app -> 项目根 */
-        if (has_main(cand)) snprintf(root, sizeof(root), "%s", cand);
+    char bundled_app[PATH_MAX];
+    snprintf(bundled_app, sizeof(bundled_app), "%s/app", res);
+    if (has_main(bundled_app)) {
+        snprintf(root, sizeof(root), "%s", bundled_app);
+    } else {
+        snprintf(root, sizeof(root), "%s", DEF_ROOT);
+        if (!has_main(root)) {
+            char cand[PATH_MAX];
+            snprintf(cand, sizeof(cand), "%s", exe);
+            for (int i = 0; i < 4; i++) up(cand);  /* MacOS -> Contents -> .app -> 项目根 */
+            if (has_main(cand)) snprintf(root, sizeof(root), "%s", cand);
+        }
     }
 
     /* 日志：项目目录不可写时退回临时目录 */
@@ -127,30 +164,44 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* 宿主不在 framework 目录内，Python 无法自行推断 prefix，必须显式指定 */
-    if (is_dir(DEF_HOME)) {
-        setenv("PYTHONHOME", DEF_HOME, 1);
+    /* 宿主不在 framework 目录内，Python 无法自行推断 prefix，必须显式指定。
+       分发包优先用包内自带的 pyhome（标准库 + site-packages 都在里面）。 */
+    char home[PATH_MAX];
+    snprintf(home, sizeof(home), "%s/pyhome", res);
+    if (!is_dir(home)) snprintf(home, sizeof(home), "%s", DEF_HOME);
+    if (is_dir(home)) {
+        setenv("PYTHONHOME", home, 1);
     } else {
-        fprintf(stderr, "[warn] PYTHONHOME not found: %s\n", DEF_HOME);
+        fprintf(stderr, "[warn] PYTHONHOME not found: %s\n", home);
     }
-    if (is_dir(DEF_SITE)) setenv("PYTHONPATH", DEF_SITE, 1);
+
+    char site[PATH_MAX];
+    snprintf(site, sizeof(site), "%s/pyhome/lib/python" DEF_PYVER "/site-packages", res);
+    if (is_dir(site)) {
+        setenv("PYTHONPATH", site, 1);
+    } else if (is_dir(DEF_SITE)) {
+        snprintf(site, sizeof(site), "%s", DEF_SITE);
+        setenv("PYTHONPATH", site, 1);
+    }
     setenv("PYTHONDONTWRITEBYTECODE", "1", 0);
     if (chdir(root) != 0) { /* 失败不致命，路径都是绝对的 */ }
 
-    /* 自检模式：只验证解释器能起来，不开窗口（供 build_app.sh 构建后校验） */
+    /* 自检模式：验证解释器与内置依赖都能起来（供 build_app.sh 构建后校验） */
     if (getenv("TCS_SELFTEST")) {
         if (saved_out >= 0) dup2(saved_out, STDOUT_FILENO);
         if (saved_err >= 0) dup2(saved_err, STDERR_FILENO);
         char *t[3];
         t[0] = exe;
         t[1] = "-c";
-        t[2] = "import sys; print('selftest-ok', sys.version.split()[0])";
+        t[2] = "import sys, PySide6, fontTools, imageio_ffmpeg, tcs.ui_main;"
+               "from tcs.media import find_ffmpeg;"
+               "print('selftest-ok', sys.version.split()[0], find_ffmpeg() or 'NO-FFMPEG')";
         return Py_BytesMain(3, t);
     }
 
     /* .venv 被删/依赖缺失时，交给 launcher 脚本回退到外部解释器并自动装依赖，
        否则会静默启动失败（用户只看到"双击没反应"） */
-    if (!is_dir(DEF_SITE)) {
+    if (!is_dir(site)) {
         char lb[PATH_MAX];
         snprintf(lb, sizeof(lb), "%s", exe);
         up(lb);                       /* 去掉文件名，得到 Contents/MacOS */
@@ -171,7 +222,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) nargv[n++] = argv[i];
     nargv[n] = NULL;
 
-    fprintf(stderr, "[launch] root=%s home=%s site=%s\n", root, DEF_HOME, DEF_SITE);
+    fprintf(stderr, "[launch] root=%s home=%s site=%s\n", root, home, site);
     int rc = Py_BytesMain(n, nargv);
     fprintf(stderr, "[exit] code=%d\n", rc);
 
@@ -217,12 +268,21 @@ fi
     echo "ROOT=\"$ROOT\""
     echo "PY_HOME=\"$PY_BASE_PREFIX\""
     echo "PY_SITE=\"$PY_SITE\""
+    echo "PY_VER_SHORT=\"$PY_VER_SHORT\""
     cat <<'SH'
 # TimeCode Studio launcher
 # No terminal window: all output goes to a log file; errors raise a dialog.
 
 DIR="$ROOT"
 [ -d "$DIR" ] || DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+# 分发包：源码与运行时都在包内
+RES="$(cd "$(dirname "$0")/../Resources" 2>/dev/null && pwd)"
+if [ -n "$RES" ] && [ -f "$RES/app/main.py" ]; then
+    DIR="$RES/app"
+    [ -d "$RES/pyhome" ] && PY_HOME="$RES/pyhome"
+    [ -d "$RES/pyhome/lib/python$PY_VER_SHORT/site-packages" ] && \
+        PY_SITE="$RES/pyhome/lib/python$PY_VER_SHORT/site-packages"
+fi
 if [ ! -f "$DIR/main.py" ]; then
     osascript -e "display alert \"TimeCode Studio\" message \"main.py not found under: $DIR\" buttons {\"OK\"} default button 1" >/dev/null 2>&1
     exit 1
@@ -305,9 +365,9 @@ chmod +x "$CONTENTS/MacOS/launcher"
     <key>CFBundleIdentifier</key>
     <string>com.whueven.timecodestudio</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleExecutable</key>
     <string>${EXEC_NAME}</string>
     <key>CFBundlePackageType</key>
@@ -378,4 +438,123 @@ if [ "$EXEC_NAME" = "TimeCodeStudio" ]; then
         printf '%s\n' "$SELFTEST_OUT" | head -15
         exit 1
     fi
+fi
+
+# ---------------- 分发包：把运行时塞进 app 内（--dist） ----------------
+# 开发态 .app 依赖仓库与 .venv，只能在构建机上用；把源码、Python 标准库、
+# 裁过的 PySide6 与 ffmpeg 一并装进 Contents/Resources 之后，app 可以脱离
+# 仓库随意移动（也能上传到 GitHub Releases 给别人下载）。
+package_dist() {
+    if [ "$EXEC_NAME" != "TimeCodeStudio" ]; then
+        echo "错误：分发包需要内嵌 Python 宿主（当前缺少 clang 或 Python framework），已中止。"
+        exit 1
+    fi
+
+    RES="$CONTENTS/Resources"
+    APPDIR="$RES/app"
+    PYHOME="$RES/pyhome"
+    SITE="$PYHOME/lib/python$PY_VER_SHORT/site-packages"
+
+    echo "正在打包自包含运行时…"
+    rm -rf "$APPDIR" "$PYHOME"
+    mkdir -p "$APPDIR/assets/fonts" "$SITE"
+
+    # ---- 1) 源码与静态资源 ----
+    rsync -a --exclude '__pycache__' --exclude '*.pyc' --exclude '.DS_Store' \
+        "$ROOT/main.py" "$ROOT/LICENSE" "$APPDIR/"
+    mkdir -p "$APPDIR/tcs"
+    rsync -a --exclude '__pycache__' --exclude '*.pyc' --exclude '.DS_Store' \
+        "$ROOT/tcs/" "$APPDIR/tcs/"
+    [ -f "$ROOT/assets/AppIcon.png" ] && cp "$ROOT/assets/AppIcon.png" "$APPDIR/assets/"
+    # 内置点阵字体随包提供：避免运行时往 app 包里写文件（会破坏签名）
+    if [ -f "$ROOT/assets/fonts/TCOSDDot-Regular.ttf" ]; then
+        cp "$ROOT/assets/fonts/TCOSDDot-Regular.ttf" "$APPDIR/assets/fonts/"
+    fi
+
+    # ---- 2) Python 标准库 ----
+    rsync -a --exclude 'site-packages/' --exclude 'test/' --exclude 'tests/' \
+        --exclude 'idlelib/' --exclude 'lib2to3/' --exclude 'tkinter/' \
+        --exclude 'ensurepip/' --exclude 'distutils/' --exclude '__pycache__/' \
+        --exclude '*.pyc' \
+        "$PY_BASE_PREFIX/lib/python$PY_VER_SHORT/" \
+        "$PYHOME/lib/python$PY_VER_SHORT/"
+
+    # ---- 3) 三方依赖 ----
+    for pkg in shiboken6 fontTools imageio_ffmpeg; do
+        rsync -a --exclude '__pycache__' --exclude '*.pyc' "$PY_SITE/$pkg" "$SITE/"
+    done
+    rsync -a --exclude '__pycache__' --exclude '*.pyc' "$PY_SITE/PySide6/" "$SITE/PySide6/"
+    rsync -a "$PY_SITE"/pyside6_essentials-*.dist-info "$SITE/" 2>/dev/null || true
+    rsync -a "$PY_SITE"/shiboken6-*.dist-info "$SITE/" 2>/dev/null || true
+    rsync -a "$PY_SITE"/fonttools-*.dist-info "$SITE/" 2>/dev/null || true
+    rsync -a "$PY_SITE"/imageio_ffmpeg-*.dist-info "$SITE/" 2>/dev/null || true
+
+    # ---- 4) 裁剪 PySide6：只留 QtCore / QtGui / QtWidgets 这条链 ----
+    ( cd "$SITE/PySide6" && for f in Qt*.abi3.so; do
+        base="${f%.abi3.so}"
+        case " QtCore QtGui QtWidgets " in
+            *" $base "*) ;;
+            *) rm -f "$f" ;;
+        esac
+      done )
+    rm -rf "$SITE/PySide6"/*.app "$SITE/PySide6"/include "$SITE/PySide6"/typesystems \
+           "$SITE/PySide6"/glue "$SITE/PySide6"/scripts "$SITE/PySide6"/doc
+    rm -rf "$SITE/PySide6/Qt/qml" "$SITE/PySide6/Qt/translations" \
+           "$SITE/PySide6/Qt/bin" "$SITE/PySide6/Qt/libexec" \
+           "$SITE/PySide6/Qt/metatypes" "$SITE/PySide6/Qt/doc" \
+           "$SITE/PySide6/Qt/cmake" "$SITE/PySide6/Qt/pkgconfig" \
+           "$SITE/PySide6/Qt/plugins/designer" "$SITE/PySide6/Qt/plugins/qmllint" \
+           "$SITE/PySide6/Qt/plugins/qmltooling" "$SITE/PySide6/Qt/plugins/sqldrivers" \
+           "$SITE/PySide6/Qt/plugins/tls" "$SITE/PySide6/Qt/plugins/generic" \
+           "$SITE/PySide6/Qt/plugins/networkinformation"
+    ( cd "$SITE/PySide6/Qt/lib" && for d in *.framework; do
+        case " QtCore.framework QtGui.framework QtWidgets.framework QtDBus.framework QtSvg.framework " in
+            *" $d "*) ;;
+            *) rm -rf "$d" ;;
+        esac
+      done )
+    rm -rf "$SITE/PySide6/Qt/lib/cmake" "$SITE/PySide6/Qt/lib/pkgconfig" 2>/dev/null || true
+    # 体积大且用不到的图片格式插件
+    rm -f "$SITE/PySide6/Qt/plugins/imageformats/libqpdf.dylib" \
+          "$SITE/PySide6/Qt/plugins/imageformats/libqtiff.dylib" \
+          "$SITE/PySide6/Qt/plugins/imageformats/libqwebp.dylib"
+    # 类型存根与字节码没有运行价值
+    find "$SITE" -name '*.pyi' -delete 2>/dev/null || true
+    find "$SITE" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+    find "$SITE" -name '*.pyc' -delete 2>/dev/null || true
+
+    # ---- 5) 重新做 ad-hoc 签名（arm64 要求可执行文件带有效签名） ----
+    find "$CONTENTS" -type f \( -name '*.dylib' -o -name '*.so' -o -name '*.abi3.so' \) \
+        -print0 2>/dev/null | xargs -0 -n 20 codesign -s - --force >/dev/null 2>&1 || true
+    codesign -s - --force --deep "$APP" >/dev/null 2>&1 || true
+
+    SIZE_APP="$(du -sh "$APP" | awk '{print $1}')"
+    echo "运行时已装入：$SIZE_APP"
+}
+
+if [ "$DIST" = "1" ]; then
+    package_dist
+
+    # 关键校验：把 app 拷到临时目录再自检，确认它真的不依赖仓库和 .venv
+    TMPROOT="$(mktemp -d)"
+    ditto "$APP" "$TMPROOT/TimeCode Studio.app"
+    echo "正在验证分发包可脱离仓库运行…"
+    DIST_OUT="$(env -i HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" TCS_SELFTEST=1 \
+        "$TMPROOT/TimeCode Studio.app/Contents/MacOS/TimeCodeStudio" 2>&1 || true)"
+    rm -rf "$TMPROOT"
+    if printf '%s' "$DIST_OUT" | grep -q "selftest-ok" && \
+       ! printf '%s' "$DIST_OUT" | grep -q "NO-FFMPEG"; then
+        echo "验证通过：内嵌 Python / PySide6 / fontTools / ffmpeg 均可用"
+    else
+        echo "验证失败：分发包缺少运行时组件，输出："
+        printf '%s\n' "$DIST_OUT" | head -20
+        exit 1
+    fi
+
+    mkdir -p "$ROOT/dist"
+    ZIP="$ROOT/dist/TimeCodeStudio-$VERSION-macOS-arm64.zip"
+    rm -f "$ZIP"
+    ditto -c -k --keepParent "$APP" "$ZIP"
+    echo "分发包：$ZIP（$(du -sh "$ZIP" | awk '{print $1}')）"
+    echo "用法：解压后把「Time Code Studio.app」拖到「应用程序」，首次打开右键 → 打开"
 fi

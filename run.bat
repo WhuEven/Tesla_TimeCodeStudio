@@ -1,5 +1,6 @@
 @echo off
-rem TimeCode Studio - Windows 启动（无控制台窗口）
+rem TimeCode Studio - Windows 启动（从源码运行，无控制台窗口）
+rem 只想用软件、没有源码？Windows 版暂无打包，需先装 Python 3.9+ 再运行本脚本。
 cd /d "%~dp0"
 
 rem 优先使用项目自带虚拟环境

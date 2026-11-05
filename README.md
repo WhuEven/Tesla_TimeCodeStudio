@@ -35,7 +35,18 @@
   **实时预估导出体积**（±10% 内）；保存对话框默认停在上次导出的目录
 - 导出过程有进度条与日志，完成后自动打开所在文件夹
 
-## 运行
+## 下载（不想装 Python 的话）
+
+到 [**Releases**](https://github.com/WhuEven/Tesla_TimeCodeStudio/releases) 下载
+`TimeCodeStudio-<版本>-macOS-arm64.zip`，解压后把 **`TimeCode Studio.app`**
+拖进「应用程序」即可。包里已内嵌 Python、PySide6 与 ffmpeg，**不需要装任何环境**。
+
+- 要求：macOS 11 以上、Apple Silicon（M 系列）。Intel Mac 请用下面的源码方式运行。
+- 首次打开：应用是本地构建、未做 Apple 公证，macOS 会拦一次 ——
+  **右键点图标 → 打开 → 仍要打开**（或「系统设置 → 隐私与安全性 → 仍要打开」）。
+- 想校验下载：`shasum -a 256 TimeCodeStudio-*.zip`，与 Release 说明里的值比对。
+
+## 运行（从源码）
 
 ```bash
 # 依赖（推荐用项目内虚拟环境，避免污染系统 Python）
@@ -57,6 +68,18 @@ python3 -m venv .venv
 （脚本会把项目根目录写进启动器）。
 启动日志写在项目根目录的 `launch.log`，异常退出时会弹窗提示。
 
+这份开发态的 app 直接读仓库源码和 `.venv`（改代码即时生效），所以**只在构建机
+上可用，不能拷给别人**。需要分发给别人（或上传 Release）时用：
+
+```bash
+./build_app.sh --dist   # 生成 dist/TimeCode Studio.app（自包含）+ 同名 zip
+```
+
+`--dist` 会把源码、Python 标准库、裁剪过的 PySide6、fontTools 与 ffmpeg 一并
+装进 `Contents/Resources`，然后拷到临时目录做一次「脱仓库启动」验证，最后
+打包成 `dist/TimeCodeStudio-<版本>-macOS-arm64.zip`（约 70 MB，解压约 190 MB）。
+版本号可用 `TCS_VERSION=1.0.1 ./build_app.sh --dist` 覆盖。
+
 构建时会做两件关键的事：
 
 - 用 `clang` 编译一个**原生宿主二进制**，直接链接 Python 动态库并调用
@@ -69,8 +92,9 @@ python3 -m venv .venv
 系统缺少 Command Line Tools（无 clang）或找不到 Python framework 时，
 会自动回退成脚本启动器：功能照常，但菜单栏会显示 Python。
 
-`run.command` 保留为排错入口（会用终端启动，方便看报错），
-没有 `.app` 时会自动构建并打开它。
+`run.command` 保留为**排错入口**（会用终端启动，方便看报错），
+没有 `.app` 时会自动构建并打开它。它是给「拉了源码的人」用的，
+不是给下载安装包的人用的。
 
 ### Windows
 
@@ -106,6 +130,10 @@ tcs/media.py          ffmpeg/ffprobe 定位与媒体探测
 tcs/fontgen.py        内置点阵字体生成（fontTools）
 tcs/assgen.py         OSD 时间码字幕（ASS）生成
 tcs/exporter.py       导出管线（filter_complex 构建、进度）
+tcs/timeline.py       截取用的单时间轴控件（入点 / 出点 / 预览点）
+tcs/playback.py       预览播放器（ffmpeg 解码 → 逐帧画面）
 tcs/ui_main.py        PySide6 界面
+build_app.sh          生成 .app（--dist 生成自包含分发包）
+release.sh            构建 + 打 tag +（可选）创建 GitHub Release
 tests/smoke_cli.py    命令行端到端冒烟测试
 ```

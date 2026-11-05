@@ -1,7 +1,8 @@
 #!/bin/bash
-# TimeCode Studio —— macOS 兼容入口
+# TimeCode Studio —— macOS 兼容入口（从源码运行 / 排错用）
 #
 # 推荐直接双击「TimeCode Studio.app」（不弹终端，见 build_app.sh）。
+# 只是想用软件、没有源码？去 Releases 下载打包好的 zip，不需要本脚本。
 # 本脚本保留给需要用终端排错的场景；若 .app 尚未生成，会自动构建后启动。
 
 cd "$(dirname "$0")" || exit 1

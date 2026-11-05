@@ -8,6 +8,8 @@ venv/
 
 # macOS 应用包（由 build_app.sh 本地生成，不入库）
 *.app/
+# 分发包产物（./build_app.sh --dist 生成的 zip，上传到 Releases，不入库）
+dist/
 
 # 非代码内容（宣传物料、验证图等）不入库
 docs/
